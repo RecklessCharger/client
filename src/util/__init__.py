@@ -567,10 +567,10 @@ def uniqueID(user, session):
             mydll = cdll.LoadLibrary(os.path.join("lib", "uid.dll"))
 
         mydll.uid.restype = c_char_p
-        baseString = (mydll.uid(session, os.path.join(LOG_DIR, "uid.log")) )
+        baseString = mydll.uid(session.encode('ascii'), os.path.join(LOG_DIR, "uid.log"))
         DllCanUnloadNow()
 
-        return baseString
+        return baseString.decode('ascii')
 
     except:
         QtGui.QMessageBox.warning(None, "C++ 2010 Runtime Missing",
