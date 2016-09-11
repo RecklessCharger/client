@@ -537,7 +537,7 @@ def irc_escape(text, a_style=""):
 
 def md5text(text):
     m = hashlib.md5()
-    m.update(text)
+    m.update(text.encode("utf-8"))
     return m.hexdigest()
 
 
