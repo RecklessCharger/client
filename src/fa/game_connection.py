@@ -1,4 +1,4 @@
-from PyQt4.QtCore import QObject, pyqtSignal, QDataStream
+from PyQt5.QtCore import QObject, pyqtSignal, QDataStream
 from struct import pack, unpack
 
 from decorators import with_logger
@@ -40,7 +40,7 @@ class GPGNetConnection(QObject):
     def _packLuaVal(self, val):
         if isinstance(val, int):
             return pack("=bi", 0, val)
-        elif isinstance(val, unicode) or isinstance(val, str):
+        elif isinstance(val, str) or isinstance(val, str):
             return pack("=bi%ds" % len(val), 1, len(val), val.encode())
         else:
             raise Exception("Unknown GameConnection Field Type: %s" % type(val))
@@ -63,7 +63,7 @@ class GPGNetConnection(QObject):
             datastring = ds.readRawData(fieldSize).decode('utf-8')
             fixedStr = datastring.replace("/t","\t").replace("/n","\n")
 
-            return unicode(fixedStr)
+            return str(fixedStr)
         else:
             raise Exception("Unknown GameConnection Field Type: %d" % fieldType)
 
@@ -80,7 +80,7 @@ class GPGNetConnection(QObject):
                 if self._socket.bytesAvailable() < size + 4:
                     return
 
-                #Omit size
+                # Omit size
                 ds.readUInt32()
 
                 self.header = ds.readRawData(size).decode()

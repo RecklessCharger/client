@@ -1,10 +1,10 @@
 import os
 import sys
-import urllib2
+import urllib.request, urllib.error, urllib.parse
 import re
 import shutil
 
-from PyQt4 import QtCore, QtGui
+from PyQt5 import QtCore, QtWidgets, QtGui
 
 from util import PREFSFILENAME
 import util
@@ -12,16 +12,23 @@ import logging
 from vault import luaparser
 import warnings
 
-import cStringIO
+import io
 import zipfile
 from config import Settings
+from downloadManager import FileDownload
+from vault.dialogs import VaultDownloadDialog, downloadVaultAsset
 
 logger = logging.getLogger(__name__)
 
 MODFOLDER = os.path.join(util.PERSONAL_DIR, "My Games", "Gas Powered Games", "Supreme Commander Forged Alliance", "Mods")
 MODVAULT_DOWNLOAD_ROOT = "{}/faf/vault/".format(Settings.get('content/host'))
 
-installedMods = [] # This is a global list that should be kept intact. So it should be cleared using installedMods[:] = []
+installedMods = []  # This is a global list that should be kept intact.
+# So it should be cleared using installedMods[:] = []
+
+# mods selected by user, are not overwritten by temporary mods selected when joining game
+selectedMods = Settings.get('play/mods', default=[])
+
 
 class ModInfo(object):
     def __init__(self, **kwargs):
@@ -43,29 +50,31 @@ class ModInfo(object):
             s = str(self.version).rstrip("0")
             self.totalname = "%s v%s" % (self.name, s)
         else:
-            raise TypeError, "version is not an int or float"
+            raise TypeError("version is not an int or float")
 
     def to_dict(self):
         out = {}
-        for k,v in self.__dict__.items():
-            if isinstance(v, (unicode, str, int, float)) and not k[0] == '_':
+        for k, v in list(self.__dict__.items()):
+            if isinstance(v, (str, int, float)) and not k[0] == '_':
                 out[k] = v
         return out
 
     def __str__(self):
         return '%s in "%s"' % (self.totalname, self.localfolder)
 
-def getAllModFolders(): #returns a list of names of installed mods
+
+def getAllModFolders():  # returns a list of names of installed mods
         mods = []
         if os.path.isdir(MODFOLDER):
             mods = os.listdir(MODFOLDER)
         return mods
-    
+
+
 def getInstalledMods():
     installedMods[:] = []
     for f in getAllModFolders():
         m = None
-        if os.path.isdir(os.path.join(MODFOLDER,f)):
+        if os.path.isdir(os.path.join(MODFOLDER, f)):
             try:
                 m = getModInfoFromFolder(f)
             except:
@@ -79,43 +88,49 @@ def getInstalledMods():
             installedMods.append(m)
     logger.debug("getting installed mods. Count: %d" % len(installedMods))
     return installedMods
-        
+
+
 def modToFilename(mod):
     return mod.absfolder
 
+
 def isModFolderValid(folder):
-    return os.path.exists(os.path.join(folder,"mod_info.lua"))
+    return os.path.exists(os.path.join(folder, "mod_info.lua"))
+
 
 def iconPathToFull(path):
     """
     Converts a path supplied in the icon field of mod_info with an absolute path to that file.
     So "/mods/modname/data/icons/icon.dds" becomes
-    "C:\Users\user\Documents\My Games\Gas Powered Games\Supreme Commander Forged Alliance\Mods\modname\data\icons\icon.dds"
+    "C:\\Users\\user\Documents\My Games\Gas Powered Games\Supreme Commander Forged Alliance\Mods\modname\data\icons\icon.dds"
     """
     if not (path.startswith("/mods") or path.startswith("mods")):
         logger.info("Something went wrong parsing the path %s" % path)
         return ""
-    return os.path.join(MODFOLDER, os.path.normpath(path[5+int(path[0]=="/"):])) #yay for dirty hacks
+    return os.path.join(MODFOLDER, os.path.normpath(path[5+int(path[0] == "/"):]))  # yay for dirty hacks
+
 
 def fullPathToIcon(path):
     p = os.path.normpath(os.path.abspath(path))
-    return p[len(MODFOLDER)-5:].replace('\\','/')
+    return p[len(MODFOLDER)-5:].replace('\\', '/')
+
 
 def getIcon(name):
-    img = os.path.join(util.CACHE_DIR, name)
+    img = os.path.join(util.MOD_PREVIEW_DIR, name)
     if os.path.isfile(img):
-        logger.debug("Using cached preview image for: " + name)
+        logger.log(5, "Using cached preview image for: " + name)
         return img
     return None
 
+
 def getModInfo(modinfofile):
-    modinfo = modinfofile.parse({"name":"name","uid":"uid","version":"version","author":"author",
-                                 "description":"description","ui_only":"ui_only",
-                                 "icon":"icon"},
-                                {"version":"1","ui_only":"false","description":"","icon":"","author":""})
+    modinfo = modinfofile.parse({"name": "name", "uid": "uid", "version": "version", "author": "author",
+                                 "description": "description", "ui_only": "ui_only",
+                                 "icon": "icon"},
+                                {"version": "1", "ui_only": "false", "description": "", "icon": "", "author": ""})
     modinfo["ui_only"] = (modinfo["ui_only"] == 'true')
-    if not "uid" in modinfo:
-        logger.warn("Couldn't find uid for mod %s" % modinfo["name"])
+    if "uid" not in modinfo:
+        logger.warning("Couldn't find uid for mod %s" % modinfo["name"])
         return None
     #modinfo["uid"] = modinfo["uid"].lower()
     try:
@@ -125,8 +140,9 @@ def getModInfo(modinfofile):
             modinfo["version"] = float(modinfo["version"])
         except:
             modinfo["version"] = 0
-            logger.warn("Couldn't find version for mod %s" % modinfo["name"])
-    return (modinfofile, modinfo)    
+            logger.warning("Couldn't find version for mod %s" % modinfo["name"])
+    return modinfofile, modinfo
+
 
 def parseModInfo(folder):
     if not isModFolderValid(folder):
@@ -136,16 +152,17 @@ def parseModInfo(folder):
 
 modCache = {}
 
+
 def getModInfoFromZip(zfile):
-    '''get the mod info from a zip file'''
+    """get the mod info from a zip file"""
     if zfile in modCache:
         return modCache[zfile]
-    
+
     r = None
-    if zipfile.is_zipfile(os.path.join(MODFOLDER,zfile)) :
+    if zipfile.is_zipfile(os.path.join(MODFOLDER, zfile)):
         zip = zipfile.ZipFile(os.path.join(MODFOLDER,zfile), "r", zipfile.ZIP_DEFLATED)
-        if zip.testzip() == None :
-            for member in zip.namelist() :
+        if zip.testzip() is None:
+            for member in zip.namelist():
                 filename = os.path.basename(member)
                 if not filename:
                     continue
@@ -154,7 +171,7 @@ def getModInfoFromZip(zfile):
                     modinfofile.iszip = True
                     modinfofile.zip = zip
                     r = getModInfo(modinfofile)
-    if r == None:
+    if r is None:
         logger.debug("mod_info.lua not found in zip file %s" % zfile)
         return None
     f, info = r
@@ -167,12 +184,13 @@ def getModInfoFromZip(zfile):
     modCache[zfile] = m
     return m
 
-def getModInfoFromFolder(modfolder): # modfolder must be local to MODFOLDER
+
+def getModInfoFromFolder(modfolder):  # modfolder must be local to MODFOLDER
     if modfolder in modCache:
         return modCache[modfolder]
 
-    r = parseModInfo(os.path.join(MODFOLDER,modfolder))
-    if r == None:
+    r = parseModInfo(os.path.join(MODFOLDER, modfolder))
+    if r is None:
         logger.debug("mod_info.lua not found in %s folder" % modfolder)
         return None
     f, info = r
@@ -185,55 +203,71 @@ def getModInfoFromFolder(modfolder): # modfolder must be local to MODFOLDER
     modCache[modfolder] = m
     return m
 
-def getActiveMods(uimods=None): # returns a list of ModInfo's containing information of the mods
+
+def getActiveMods(uimods=None, temporary=True):  # returns a list of ModInfo's containing information of the mods
     """uimods:
         None - return all active mods
         True - only return active UI Mods
         False - only return active non-UI Mods
+       temporary:
+        read from game.prefs and not from settings
     """
     active_mods = []
     try:
         if not os.path.exists(PREFSFILENAME):
             logger.info("No game.prefs file found")
             return []
-        
-        l = luaparser.luaParser(PREFSFILENAME)
-        l.loweringKeys = False
-        modlist = l.parse({"active_mods":"active_mods"},{"active_mods":{}})["active_mods"]
-        if l.error:
-            logger.info("Error in reading the game.prefs file")
-            return []
-        uids = [uid for uid,b in modlist.items() if b == 'true']
-        #logger.debug("Active mods detected: %s" % str(uids))
-        
+        if temporary:
+            l = luaparser.luaParser(PREFSFILENAME)
+            l.loweringKeys = False
+            modlist = l.parse({"active_mods":"active_mods"}, {"active_mods": {}})["active_mods"]
+            if l.error:
+                logger.info("Error in reading the game.prefs file")
+                return []
+            uids = [uid for uid,b in list(modlist.items()) if b == 'true']
+            #logger.debug("Active mods detected: %s" % str(uids))
+        else:
+            uids = selectedMods[:]
+
         allmods = []
         for m in installedMods:
-            if ((uimods == True and m.ui_only) or (uimods == False and not m.ui_only) or uimods == None):
+            if (uimods and m.ui_only) or (not uimods and not m.ui_only) or uimods is None:
                 allmods.append(m)
         active_mods = [m for m in allmods if m.uid in uids]
         #logger.debug("Allmods uids: %s\n\nActive mods uids: %s\n" % (", ".join([mod.uid for mod in allmods]), ", ".join([mod.uid for mod in allmods])))
         return active_mods
     except:
         return []
-    
 
-def setActiveMods(mods, keepuimods=True): #uimods works the same as in getActiveMods
+
+def setActiveMods(mods, keepuimods=True, temporary=True):  # uimods works the same as in getActiveMods
     """
     keepuimods:
         None: Replace all active mods with 'mods'
         True: Keep the UI mods already activated activated
         False: Keep only the non-UI mods that were activated activated
         So set it True if you want to set gameplay mods, and False if you want to set UI mods.
+    temporary:
+        Set this when mods are activated due to joining a game.
     """
-    if keepuimods != None:
-        keepTheseMods = getActiveMods(keepuimods) # returns the active UI mods if True, the active non-ui mods if False
+    if keepuimods is not None:
+        keepTheseMods = getActiveMods(keepuimods)  # returns the active UI mods if True, the active non-ui mods if False
     else:
         keepTheseMods = []
     allmods = keepTheseMods + mods
+    logger.debug('setting active Mods: {}'.format([mod.uid for mod in allmods]))
     s = "active_mods = {\n"
     for mod in allmods:
         s += "['%s'] = true,\n" % str(mod.uid)
     s += "}"
+
+    if not temporary:
+        global selectedMods
+        logger.debug('selectedMods was: {}'.format(Settings.get('play/mods')))
+        selectedMods = [str(mod.uid) for mod in allmods]
+        logger.debug('Writing selectedMods: {}'.format(selectedMods))
+        Settings.set('play/mods', selectedMods)
+        logger.debug('selectedMods written: {}'.format(Settings.get('play/mods')))
 
     try:
         f = open(PREFSFILENAME, 'r')
@@ -245,7 +279,7 @@ def setActiveMods(mods, keepuimods=True): #uimods works the same as in getActive
         f.close()
 
     if re.search("active_mods\s*=\s*{.*?}", data, re.S):
-        data = re.sub("active_mods\s*=\s*{.*?}",s,data,1,re.S)
+        data = re.sub("active_mods\s*=\s*{.*?}", s, data, 1, re.S)
     else:
         data += "\n" + s
 
@@ -260,13 +294,14 @@ def setActiveMods(mods, keepuimods=True): #uimods works the same as in getActive
 
     return True
 
-def updateModInfo(mod, info): #should probably not be used.
+
+def updateModInfo(mod, info):  # should probably not be used.
     """
     Updates a mod_info.lua file with new data.
     Because those files can be random lua this function can fail if the file is complicated enough
     If every value however is on a seperate line, this should work.
     """
-    logger.warn("updateModInfo called. Probably not a good idea")
+    logger.warning("updateModInfo called. Probably not a good idea")
     fname = mod.mod_info
     try:
         f = open(fname, 'r')
@@ -277,13 +312,16 @@ def updateModInfo(mod, info): #should probably not be used.
     else:
         f.close()
 
-    for k,v in info.items():
-        if type(v) in (bool,int): val = str(v).lower()
-        if type(v) in (unicode, str): val = '"' + v.replace('"', '\\"') + '"'
-        if re.search(r'^\s*'+k, data , re.M):
-            data = re.sub(r'^\s*' + k + r'\s*=.*$',"%s = %s" % (k,val), data, 1, re.M)
+    for k, v in list(info.items()):
+        if type(v) in (bool, int):
+            val = str(v).lower()
+        if type(v) in (str, str):
+            val = '"' + v.replace('"', '\\"') + '"'
+        if re.search(r'^\s*'+k, data, re.M):
+            data = re.sub(r'^\s*' + k + r'\s*=.*$', "%s = %s" % (k, val), data, 1, re.M)
         else:
-            if data[-1] != '\n': data += '\n'
+            if data[-1] != '\n':
+                data += '\n'
             data += "%s = %s" % (k, val)
     try:
         f = open(fname, 'w')
@@ -293,7 +331,7 @@ def updateModInfo(mod, info): #should probably not be used.
         return False
     else:
         f.close()
-        
+
     return True
 
 
@@ -304,14 +342,15 @@ def generateThumbnail(sourcename, destname):
     try:
         img = bytearray()
         buf = bytearray(16)
-        file = open(sourcename,"rb")
-        file.seek(128) # skip header
+        file = open(sourcename, "rb")
+        file.seek(128)  # skip header
         while file.readinto(buf):
             img += buf[:3] + buf[4:7] + buf[8:11] + buf[12:15]
         file.close()
 
         size = int((len(img)/3) ** (1.0/2))
-        imageFile = QtGui.QImage(img,size,size,QtGui.QImage.Format_RGB888).rgbSwapped().scaled(100,100,transformMode = QtCore.Qt.SmoothTransformation)
+        imageFile = QtGui.QImage(img, size, size, QtGui.QImage.Format_RGB888).rgbSwapped().\
+            scaled(100, 100, transformMode=QtCore.Qt.SmoothTransformation)
         imageFile.save(destname)
     except IOError:
         return False
@@ -321,82 +360,31 @@ def generateThumbnail(sourcename, destname):
     else:
         return False
 
-def downloadMod(item): #most of this function is stolen from fa.maps.downloadMap
-    if isinstance(item,basestring):
-        link = MODVAULT_DOWNLOAD_ROOT + urllib2.quote(item)
+
+def downloadMod(item):
+    if isinstance(item, str):
+        link = MODVAULT_DOWNLOAD_ROOT + urllib.parse.quote(item)
         logger.debug("Getting mod from: " + link)
     else:
         link = item.link
         logger.debug("Getting mod from: " + link)
-        link = urllib2.quote(link, "http://")
-    
-    
+        link = urllib.parse.quote(link, "http://")
 
-    
-    progress = QtGui.QProgressDialog()
-    progress.setCancelButtonText("Cancel")
-    progress.setWindowFlags(QtCore.Qt.CustomizeWindowHint | QtCore.Qt.WindowTitleHint)
-    progress.setAutoClose(False)
-    progress.setAutoReset(False)
-    
-    try:
-        req = urllib2.Request(link, headers={'User-Agent' : "FAF Client"})         
-        zipwebfile  = urllib2.urlopen(req)
-
-        meta = zipwebfile.info()
-        file_size = int(meta.getheaders("Content-Length")[0])
-        progress.setMinimum(0)
-        progress.setMaximum(file_size)
-        progress.setModal(1)
-        progress.setWindowTitle("Downloading Mod")
-        progress.setLabelText(link)
-    
-        progress.show()
-
-        #Download the file as a series of 8 KiB chunks, then uncompress it.
-        output = cStringIO.StringIO()
-        file_size_dl = 0
-        block_sz = 8192       
-
-        while progress.isVisible():
-            read_buffer = zipwebfile.read(block_sz)
-            if not read_buffer:
-                break
-            file_size_dl += len(read_buffer)
-            output.write(read_buffer)
-            progress.setValue(file_size_dl)
-    
-        progress.close()
-        
-        if file_size_dl == file_size:
-            zfile = zipfile.ZipFile(output)
-            dirname = zfile.namelist()[0].split('/',1)[0]
-            if os.path.exists(os.path.join(MODFOLDER, dirname)):
-                oldmod = getModInfoFromFolder(dirname)
-                result = QtGui.QMessageBox.question(None, "Modfolder already exists",
-                                "The mod is to be downloaded to the folder '%s'. This folder already exists and contains <b>%s</b>. Do you want to overwrite this mod?" % (dirname,oldmod.totalname), QtGui.QMessageBox.Yes, QtGui.QMessageBox.No)
-                if result == QtGui.QMessageBox.No:
-                    return False
-                removeMod(oldmod)
-            zfile.extractall(MODFOLDER)
-            logger.debug("Successfully downloaded and extracted mod from: " + link)
-            return True
-        else:    
-            logger.warn("Mod download cancelled for: " + link)
+    def handle_exist(path, modname):
+        modpath = os.path.join(path, modname)
+        oldmod = getModInfoFromFolder(modpath)
+        result = QtWidgets.QMessageBox.question(None, "Modfolder already exists",
+                                                ("The mod is to be downloaded to the folder '{}'. This folder already "
+                                                 "exists and contains <b>{}</b>. Do you want to overwrite this mod?")
+                                                .format(modpath, oldmod.totalname), QtWidgets.QMessageBox.Yes,
+                                                QtWidgets.QMessageBox.No)
+        if result == QtWidgets.QMessageBox.No:
             return False
+        removeMod(oldmod)
+        return True
 
-    except:
-        logger.warn("Mod download or extraction failed for: " + link)        
-        if sys.exc_type is urllib2.HTTPError:
-            logger.warning("ModVault download failed with HTTPError, mod probably not in vault (or broken).")
-            QtGui.QMessageBox.information(None, "Mod not downloadable", "<b>This mod was not found in the vault (or is broken).</b><br/>You need to get it from somewhere else in order to use it." )
-        else:                
-            logger.error("Download Exception", exc_info=sys.exc_info())
-            QtGui.QMessageBox.information(None, "Mod installation failed", "<b>This mod could not be installed (please report this map or bug).</b>")
-        return False
+    return downloadVaultAsset(link, MODFOLDER, handle_exist, link, "mod", False)
 
-    return True
-    
 
 def removeMod(mod):
     logger.debug("removing mod %s" % mod.name)
@@ -413,5 +401,5 @@ def removeMod(mod):
         del modCache[real.localfolder]
     installedMods.remove(real)
     return True
-    #we don't update the installed mods, because the operating system takes
-    #some time registering the deleted folder.
+    # we don't update the installed mods, because the operating system takes
+    # some time registering the deleted folder.

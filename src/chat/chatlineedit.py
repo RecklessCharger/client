@@ -1,123 +1,113 @@
 
-
-
-
-'''
+"""
 Created on Dec 8, 2011
 
 @author: thygrrr
-'''
-from PyQt4 import QtCore, QtGui
+"""
+from PyQt5 import QtCore, QtWidgets
 
-class ChatLineEdit(QtGui.QLineEdit):
-    '''
+
+class ChatLineEdit(QtWidgets.QLineEdit):
+    """
     A special promoted QLineEdit that is used in channel.ui to provide a mirc-style editing experience
     with completion and history.
     LATER: History and tab completion support
-    '''
+    """
     def __init__(self, parent):
-        QtGui.QLineEdit.__init__(self, parent)
-        self.returnPressed.connect(self.onLineEntered)
+        QtWidgets.QLineEdit.__init__(self, parent)
+        self.returnPressed.connect(self.on_line_entered)
         self.history = []
         self.currentHistoryIndex = None
         self.historyShown = False
         self.completionStarted = False
-        self.chatters = {}
+        self.channel = None
         self.LocalChatterNameList = []
         self.currenLocalChatter = None
 
-        
-    def setChatters(self, chatters):
-        self.chatters = chatters
+    def set_channel(self, channel):
+        self.channel = channel
 
-   
     def event(self, event):
-        if (event.type() == QtCore.QEvent.KeyPress):
-            #Swallow a selection of keypresses that we want for our history support.
-            if (event.key() == QtCore.Qt.Key_Tab):
-                self.tryCompletion()
+        if event.type() == QtCore.QEvent.KeyPress:
+            # Swallow a selection of keypresses that we want for our history support.
+            if event.key() == QtCore.Qt.Key_Tab:
+                self.try_completion()
                 return True
-            elif (event.key() == QtCore.Qt.Key_Space):
-                self.acceptCompletion()
-                return QtGui.QLineEdit.event(self, event)
-            elif (event.key() == QtCore.Qt.Key_Up):
-                self.cancelCompletion()
-                self.prevHistory()
+            elif event.key() == QtCore.Qt.Key_Space:
+                self.accept_completion()
+                return QtWidgets.QLineEdit.event(self, event)
+            elif event.key() == QtCore.Qt.Key_Up:
+                self.cancel_completion()
+                self.prev_history()
                 return True
-            elif (event.key() == QtCore.Qt.Key_Down):
-                self.cancelCompletion()
-                self.nextHistory()
+            elif event.key() == QtCore.Qt.Key_Down:
+                self.cancel_completion()
+                self.next_history()
                 return True
             else:
-                self.cancelCompletion()
-                return QtGui.QLineEdit.event(self, event)
+                self.cancel_completion()
+                return QtWidgets.QLineEdit.event(self, event)
 
         # All other events (non-keypress)
-        return QtGui.QLineEdit.event(self, event)
-
+        return QtWidgets.QLineEdit.event(self, event)
 
     @QtCore.pyqtSlot()
-    def onLineEntered(self):
+    def on_line_entered(self):
         self.history.append(self.text())
         self.currentHistoryIndex = len(self.history) - 1
 
-
     def showEvent(self, event):
         self.setFocus(True)
-        return QtGui.QLineEdit.showEvent(self, event)
+        return QtWidgets.QLineEdit.showEvent(self, event)
 
-
-    def tryCompletion(self):
-        if (self.completionStarted == False):
-            #no completion on empty line
-            if (self.text() == ""):
+    def try_completion(self):
+        if not self.completionStarted:
+            # no completion on empty line
+            if self.text() == "":
                 return
-            #no completion if last character is a space
-            if (self.text().rfind(" ") == (len(self.text()) -1)):
+            # no completion if last character is a space
+            if self.text().rfind(" ") == (len(self.text()) - 1):
                 return            
 
             self.completionStarted = True   
             self.LocalChatterNameList = []
-            self.completionText = self.text().split()[-1]                   # take last word from line
-            self.completionLine = self.text().rstrip(self.completionText)   # store line to be completed without the completion string
+            self.completionText = self.text().split()[-1]                  # take last word from line
+            self.completionLine = self.text().rstrip(self.completionText)  # store line to be completed without the completion string
             
-            #make a copy of users because the list might change frequently giving all kind of problems
-            for name in self.chatters:
-                if (name.lower().startswith(self.completionText.lower())):
-                    self.LocalChatterNameList.append(name)
+            # make a copy of users because the list might change frequently giving all kind of problems
+            if self.channel is not None:
+                for cc in self.channel.chatters.values():
+                    name = cc.chatter.name
+                    if name.lower().startswith(self.completionText.lower()):
+                        self.LocalChatterNameList.append(name)
             
-            if (len(self.LocalChatterNameList) > 0):
-                self.LocalChatterNameList.sort(lambda a, b: cmp(a.lower(), b.lower()))
-                self.currenLocalChatter = 0;
+            if len(self.LocalChatterNameList) > 0:
+                self.LocalChatterNameList.sort(key=lambda chatter: chatter.lower())
+                self.currenLocalChatter = 0
                 self.setText(self.completionLine + self.LocalChatterNameList[self.currenLocalChatter])
             else:
                 self.currenLocalChatter = None
         else:
-            if (self.currenLocalChatter != None):
+            if self.currenLocalChatter is not None:
                 self.currenLocalChatter = (self.currenLocalChatter + 1) % len(self.LocalChatterNameList)
                 self.setText(self.completionLine + self.LocalChatterNameList[self.currenLocalChatter])
 
-
-    def acceptCompletion(self):
+    def accept_completion(self):
         self.completionStarted = False
 
-
-    def cancelCompletion(self):
+    def cancel_completion(self):
         self.completionStarted = False
 
-
-    def prevHistory(self):
-        if (self.currentHistoryIndex != None): # no history nothing to do
-            if (self.currentHistoryIndex > 0 and self.historyShown == True): #check for boundaries and only change index is hostory is alrady shown
-                self.currentHistoryIndex = self.currentHistoryIndex - 1
+    def prev_history(self):
+        if self.currentHistoryIndex is not None:  # no history nothing to do
+            if self.currentHistoryIndex > 0 and self.historyShown:  # check for boundaries and only change index is hostory is alrady shown
+                self.currentHistoryIndex -= 1
             self.historyShown = True
             self.setText(self.history[self.currentHistoryIndex])
     
-    
-    def nextHistory(self):
-        if (self.currentHistoryIndex != None):
-            if (self.currentHistoryIndex < len(self.history)-1 and self.historyShown == True): #check for boundaries and only change index is hostory is alrady shown
-                self.currentHistoryIndex = self.currentHistoryIndex + 1
+    def next_history(self):
+        if self.currentHistoryIndex is not None:
+            if self.currentHistoryIndex < len(self.history)-1 and self.historyShown:  # check for boundaries and only change index is hostory is alrady shown
+                self.currentHistoryIndex += 1
             self.historyShown = True
             self.setText(self.history[self.currentHistoryIndex])          
-

@@ -1,6 +1,9 @@
 import logging
+import os
+import zipfile
+import binascii
 
-from PyQt4 import QtGui
+from PyQt5 import QtWidgets
 
 import fa
 import config
@@ -12,7 +15,7 @@ import util
 logger = logging.getLogger(__name__)
 
 
-def map(mapname, force=False, silent=False):
+def map_(mapname, force=False, silent=False):
     """
     Assures that the map is available in FA, or returns false.
     """
@@ -27,18 +30,19 @@ def map(mapname, force=False, silent=False):
 
     auto = config.Settings.get('maps/autodownload', default=False, type=bool)
     if not auto:
-        msgbox = QtGui.QMessageBox()
-        msgbox.setWindowTitle("Download Mod")
+        msgbox = QtWidgets.QMessageBox()
+        msgbox.setWindowTitle("Download Map")
         msgbox.setText("Seems that you don't have the map used this game. Do you want to download it?<br/><b>" + mapname + "</b>")
         msgbox.setInformativeText("If you respond 'Yes to All' maps will be downloaded automatically in the future")
-        msgbox.setStandardButtons(QtGui.QMessageBox.Yes | QtGui.QMessageBox.YesToAll | QtGui.QMessageBox.No)
+        msgbox.setStandardButtons(QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.YesToAll | QtWidgets.QMessageBox.No)
         result = msgbox.exec_()
-        if result == QtGui.QMessageBox.No:
+        if result == QtWidgets.QMessageBox.No:
             return False
-        elif result == QtGui.QMessageBox.YesToAll:
+        elif result == QtWidgets.QMessageBox.YesToAll:
             config.Settings.set('maps/autodownload', True)
 
     return fa.maps.downloadMap(mapname, silent=silent)
+
 
 def featured_mod(featured_mod, version):
     pass
@@ -50,18 +54,60 @@ def sim_mod(sim_mod, version):
 
 def path(parent):
     while not validatePath(util.settings.value("ForgedAlliance/app/path", "", type=str)):
-        logger.warn("Invalid game path: " + util.settings.value("ForgedAlliance/app/path", "", type=str))
+        logger.warning("Invalid game path: " + util.settings.value("ForgedAlliance/app/path", "", type=str))
         wizard = Wizard(parent)
         result = wizard.exec_()
-        if result == QtGui.QWizard.Rejected:
+        if result == QtWidgets.QWizard.Rejected:
             return False
 
     logger.info("Writing fa_path.lua config file.")
     writeFAPathLua()
+    return True
 
 
 def game(parent):
     return True
+
+
+def crc32(fname):
+    try:
+        with open(fname) as stream:
+            return binascii.crc32(stream.read())
+    except:
+        logger.exception('CRC check fail!')
+        return None
+
+
+def checkMovies(files):
+    """
+    Unpacks movies (based on path in zipfile) to the movies folder.
+
+    Movies must be unpacked for FA to be able to play them.
+
+    This is a hack needed because the game updater can only handle bin and gamedata.
+    """
+
+    logger.info('checking updated files: {}'.format(files))
+
+    # construct dirs
+    gd = os.path.join(util.APPDATA_DIR, 'gamedata')
+
+    for fname in files:
+        origpath = os.path.join(gd, fname)
+
+        if os.path.exists(origpath) and zipfile.is_zipfile(origpath):
+            try:
+                zf = zipfile.ZipFile(origpath)
+            except:
+                logger.exception('Failed to open Game File {}'.format(origpath))
+                continue
+
+            for zi in zf.infolist():
+                if zi.filename.startswith('movies'):
+                    tgtpath = os.path.join(util.APPDATA_DIR, zi.filename)
+                    # copy only if file is different - check first if file exists, then if size is changed, then crc
+                    if not os.path.exists(tgtpath) or os.stat(tgtpath).st_size != zi.file_size or crc32(tgtpath) != zi.CRC:
+                        zf.extract(zi, util.APPDATA_DIR)
 
 
 def check(featured_mod, mapname=None, version=None, modVersions=None, sim_mods=None, silent=False):
@@ -75,11 +121,12 @@ def check(featured_mod, mapname=None, version=None, modVersions=None, sim_mods=N
     if version is None:
         logger.info("Version unknown, assuming latest")
 
-    # Perform the actual comparisons and updating                    
+    # Perform the actual comparisons and updating
     logger.info("Updating FA for mod: " + str(featured_mod) + ", version " + str(version))
 
-    import client
-    path(client.instance)
+    import client # FIXME: forced by circular imports
+    if not path(client.instance):
+        return False
 
     # Spawn an update for the required mod
     game_updater = fa.updater.Updater(featured_mod, version, modVersions, silent=silent)
@@ -88,13 +135,19 @@ def check(featured_mod, mapname=None, version=None, modVersions=None, sim_mods=N
     if result != fa.updater.Updater.RESULT_SUCCESS:
         return False
 
+    try:
+        if len(game_updater.updatedFiles) > 0:
+            checkMovies(game_updater.updatedFiles)
+    except:
+        logger.exception('Error checking game files for movies')
+        return False
+
     # Now it's down to having the right map
     if mapname:
-        if not map(mapname, silent=silent):
+        if not map_(mapname, silent=silent):
             return False
 
     if sim_mods:
         return checkMods(sim_mods)
 
     return True
-

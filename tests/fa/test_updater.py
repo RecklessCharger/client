@@ -1,8 +1,10 @@
 __author__ = 'Thygrrr'
 
 from fa import updater
-from PyQt4 import QtGui, QtCore
+from PyQt5 import QtWidgets, QtCore
 import pytest
+import collections
+
 
 class NoIsFinished(QtCore.QObject):
     finished = QtCore.pyqtSignal()
@@ -14,23 +16,23 @@ class NoOpThread(QtCore.QThread):
 
 
 def test_updater_is_a_dialog(application):
-    assert isinstance(updater.UpdaterProgressDialog(None), QtGui.QDialog)
+    assert isinstance(updater.UpdaterProgressDialog(None), QtWidgets.QDialog)
 
 
 def test_updater_has_progress_bar_game_progress(application):
-    assert isinstance(updater.UpdaterProgressDialog(None).gameProgress, QtGui.QProgressBar)
+    assert isinstance(updater.UpdaterProgressDialog(None).gameProgress, QtWidgets.QProgressBar)
 
 
 def test_updater_has_progress_bar_map_progress(application):
-    assert isinstance(updater.UpdaterProgressDialog(None).mapProgress, QtGui.QProgressBar)
+    assert isinstance(updater.UpdaterProgressDialog(None).mapProgress, QtWidgets.QProgressBar)
 
 
 def test_updater_has_progress_bar_mod_progress(application):
-    assert isinstance(updater.UpdaterProgressDialog(None).mapProgress, QtGui.QProgressBar)
+    assert isinstance(updater.UpdaterProgressDialog(None).mapProgress, QtWidgets.QProgressBar)
 
 
 def test_updater_has_method_append_log(application):
-    assert callable(updater.UpdaterProgressDialog(None).appendLog)
+    assert isinstance(updater.UpdaterProgressDialog(None).appendLog, collections.Callable)
 
 
 def test_updater_append_log_accepts_string(application):
@@ -38,7 +40,7 @@ def test_updater_append_log_accepts_string(application):
 
 
 def test_updater_has_method_add_watch(application):
-    assert callable(updater.UpdaterProgressDialog(None).addWatch)
+    assert isinstance(updater.UpdaterProgressDialog(None).addWatch, collections.Callable)
 
 
 def test_updater_append_log_accepts_qobject_with_signals_finished(application):
@@ -70,7 +72,7 @@ def test_updater_hides_and_accepts_if_all_watches_are_finished(application):
 
     application.processEvents()
     assert not u.isVisible()
-    assert u.result() == QtGui.QDialog.Accepted
+    assert u.result() == QtWidgets.QDialog.Accepted
 
 
 def test_updater_does_not_hide_and_accept_before_all_watches_are_finished(application):
@@ -88,5 +90,5 @@ def test_updater_does_not_hide_and_accept_before_all_watches_are_finished(applic
 
     application.processEvents()
     assert u.isVisible()
-    assert not u.result() == QtGui.QDialog.Accepted
+    assert not u.result() == QtWidgets.QDialog.Accepted
 

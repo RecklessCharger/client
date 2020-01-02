@@ -1,15 +1,23 @@
-from PyQt4 import QtCore, QtGui
+from PyQt5 import QtCore, QtWidgets
 from enum import Enum
 from config import Settings
 import util
 import notifications as ns
 from notifications.hook_useronline import NsHookUserOnline
 from notifications.hook_newgame import NsHookNewGame
+from notifications.hook_gamefull import NsHookGameFull
 
 """
 The UI of the Notification System Settings Frame.
 Each module/hook for the notification system must be registered here.
 """
+
+
+class IngameNotification(Enum):
+    ENABLE = 0
+    DISABLE = 1
+    QUEUE = 2
+
 
 class NotificationPosition(Enum):
     BOTTOM_RIGHT = 0
@@ -29,7 +37,9 @@ class NotificationPosition(Enum):
 
 
 # TODO: how to register hooks?
-FormClass2, BaseClass2 = util.loadUiType("notification_system/ns_settings.ui")
+FormClass2, BaseClass2 = util.THEME.loadUiType("notification_system/ns_settings.ui")
+
+
 class NsSettingsDialog(FormClass2, BaseClass2):
     def __init__(self, client):
         BaseClass2.__init__(self)
@@ -45,32 +55,36 @@ class NsSettingsDialog(FormClass2, BaseClass2):
         self.hooks = {}
         self.hooks[ns.Notifications.USER_ONLINE] = NsHookUserOnline()
         self.hooks[ns.Notifications.NEW_GAME] = NsHookNewGame()
+        self.hooks[ns.Notifications.GAME_FULL] = NsHookGameFull()
 
-        model = NotificationHooks(self, self.hooks.values())
+        model = NotificationHooks(self, list(self.hooks.values()))
         self.tableView.setModel(model)
         # stretch first column
-        self.tableView.horizontalHeader().setResizeMode(0, QtGui.QHeaderView.Stretch)
+        self.tableView.horizontalHeader().setSectionResizeMode(0, QtWidgets.QHeaderView.Stretch)
 
         for row in range(0, model.rowCount(None)):
             self.tableView.setIndexWidget(model.createIndex(row, 3), model.getHook(row).settings())
 
         self.loadSettings()
 
-
     def loadSettings(self):
         self.enabled = Settings.get('notifications/enabled', True, type=bool)
         self.popup_lifetime = Settings.get('notifications/popup_lifetime', 5, type=int)
-        self.popup_position = NotificationPosition(Settings.get('notifications/popup_position', NotificationPosition.BOTTOM_RIGHT.value, type=int))
+        self.popup_position = NotificationPosition(Settings.get('notifications/popup_position',
+                                                                NotificationPosition.BOTTOM_RIGHT.value, type=int))
+        self.ingame_notifications =  IngameNotification(Settings.get('notifications/ingame',
+                                                                     IngameNotification.ENABLE, type=int))
 
         self.nsEnabled.setChecked(self.enabled)
         self.nsPopLifetime.setValue(self.popup_lifetime)
         self.nsPositionComboBox.setCurrentIndex(self.popup_position.value)
-
+        self.nsIngameComboBox.setCurrentIndex(self.ingame_notifications.value)
 
     def saveSettings(self):
         Settings.set('notifications/enabled', self.enabled)
         Settings.set('notifications/popup_lifetime', self.popup_lifetime)
         Settings.set('notifications/popup_position', self.popup_position.value)
+        Settings.set('notifications/ingame', self.ingame_notifications.value)
 
         self.client.actionNsEnabled.setChecked(self.enabled)
 
@@ -79,6 +93,7 @@ class NsSettingsDialog(FormClass2, BaseClass2):
         self.enabled = self.nsEnabled.isChecked()
         self.popup_lifetime = self.nsPopLifetime.value()
         self.popup_position = NotificationPosition(self.nsPositionComboBox.currentIndex())
+        self.ingame_notifications = IngameNotification(self.nsIngameComboBox.currentIndex())
 
         self.saveSettings()
         self.hide()
@@ -108,6 +123,8 @@ class NsSettingsDialog(FormClass2, BaseClass2):
 Model Class for notification type table.
 Needs an NsHook.
 """
+
+
 class NotificationHooks(QtCore.QAbstractTableModel):
     POPUP = 1
     SOUND = 2
@@ -122,7 +139,7 @@ class NotificationHooks(QtCore.QAbstractTableModel):
     def flags(self, index):
         flags = super(QtCore.QAbstractTableModel, self).flags(index)
         if index.column() == self.POPUP or index.column() == self.SOUND:
-            return  flags | QtCore.Qt.ItemIsUserCheckable
+            return flags | QtCore.Qt.ItemIsUserCheckable
         if index.column() == self.SETTINGS:
             return flags | QtCore.Qt.ItemIsEditable
         return flags
@@ -140,7 +157,7 @@ class NotificationHooks(QtCore.QAbstractTableModel):
         if not index.isValid():
             return None
 
-        #if role == QtCore.Qt.TextAlignmentRole and index.column() != 0:
+        # if role == QtCore.Qt.TextAlignmentRole and index.column() != 0:
         #    return QtCore.Qt.AlignHCenter
 
         if role == QtCore.Qt.CheckStateRole:

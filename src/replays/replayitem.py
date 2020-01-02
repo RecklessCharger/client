@@ -1,18 +1,20 @@
 import os
 import time
+from datetime import datetime, timezone
 
 import util
-from PyQt4 import QtCore, QtGui
+from PyQt5 import QtCore, QtWidgets, QtGui
 
-from src.config import Settings
-from src.fa import maps
-from src.games.moditem import mods
+from config import Settings
+from fa import maps
+from games.moditem import mods
+from downloadManager import DownloadRequest
 
 
-class ReplayItemDelegate(QtGui.QStyledItemDelegate):
+class ReplayItemDelegate(QtWidgets.QStyledItemDelegate):
     
     def __init__(self, *args, **kwargs):
-        QtGui.QStyledItemDelegate.__init__(self, *args, **kwargs)
+        QtWidgets.QStyledItemDelegate.__init__(self, *args, **kwargs)
         
     def paint(self, painter, option, index, *args, **kwargs):
         self.initStyleOption(option, index)
@@ -26,9 +28,9 @@ class ReplayItemDelegate(QtGui.QStyledItemDelegate):
         iconsize = icon.actualSize(option.rect.size())
         
         # clear icon and text before letting the control draw itself because we're rendering these parts ourselves
-        option.icon = QtGui.QIcon()        
+        option.icon = QtGui.QIcon()
         option.text = ""  
-        option.widget.style().drawControl(QtGui.QStyle.CE_ItemViewItem, option, painter, option.widget)
+        option.widget.style().drawControl(QtWidgets.QStyle.CE_ItemViewItem, option, painter, option.widget)
         
         # Shadow
         # painter.fillRect(option.rect.left()+8-1, option.rect.top()+8-1, iconsize.width(), iconsize.height(), QtGui.QColor("#202020"))
@@ -37,20 +39,19 @@ class ReplayItemDelegate(QtGui.QStyledItemDelegate):
         icon.paint(painter, option.rect.adjusted(5-2, -2, 0, 0), QtCore.Qt.AlignLeft|QtCore.Qt.AlignVCenter)
         
         # Frame around the icon
-#        pen = QtGui.QPen()
-#        pen.setWidth(1);
-#        pen.setBrush(QtGui.QColor("#303030"));  #FIXME: This needs to come from theme.
-#        pen.setCapStyle(QtCore.Qt.RoundCap);
+#        pen = QtWidgets.QPen()
+#        pen.setWidth(1)
+#        pen.setBrush(QtGui.QColor("#303030"))  #FIXME: This needs to come from theme.
+#        pen.setCapStyle(QtCore.Qt.RoundCap)
 #        painter.setPen(pen)
 #        painter.drawRect(option.rect.left()+5-2, option.rect.top()+5-2, iconsize.width(), iconsize.height())
 
         # Description
-        painter.translate(option.rect.left() + iconsize.width() + 10, option.rect.top()+10)
+        painter.translate(option.rect.left() + iconsize.width() + 10, option.rect.top() + 10)
         clip = QtCore.QRectF(0, 0, option.rect.width()-iconsize.width() - 10 - 5, option.rect.height())
         html.drawContents(painter, clip)
   
         painter.restore()
-        
 
     def sizeHint(self, option, index, *args, **kwargs):
         clip = index.model().data(index, QtCore.Qt.UserRole)
@@ -64,9 +65,9 @@ class ReplayItemDelegate(QtGui.QStyledItemDelegate):
             return QtCore.QSize(215, 35)
 
 
-class ReplayItem(QtGui.QTreeWidgetItem):
+class ReplayItem(QtWidgets.QTreeWidgetItem):
     # list element
-    FORMATTER_REPLAY                = unicode(util.readfile("replays/formatters/replay.qthtml"))
+    FORMATTER_REPLAY                = str(util.THEME.readfile("replays/formatters/replay.qthtml"))
     # replay-info elements
     FORMATTER_REPLAY_INFORMATION    = "<h2 align='center'>Replay UID : {uid}</h2><table border='0' cellpadding='0' cellspacing='5' align='center'><tbody>{teams}</tbody></table>"
     FORMATTER_REPLAY_TEAM_SPOILED   = "<tr><td colspan='3' align='center' valign='middle'><font size='+2'>{title}</font></td></tr>{players}"
@@ -78,7 +79,7 @@ class ReplayItem(QtGui.QTreeWidgetItem):
     FORMATTER_REPLAY_PLAYER_LABEL   = "<td align='{alignment}' valign='middle' width='130'>{player_name} ({player_rating})</td>"
 
     def __init__(self, uid, parent, *args, **kwargs):
-        QtGui.QTreeWidgetItem.__init__(self, *args, **kwargs)
+        QtWidgets.QTreeWidgetItem.__init__(self, *args, **kwargs)
 
         self.uid            = uid
         self.parent         = parent
@@ -93,13 +94,13 @@ class ReplayItem(QtGui.QTreeWidgetItem):
         
         self.startDate      = None
         self.duration       = None
-        
+        self.live_delay     = False
+
         self.moreInfo       = False
         self.replayInfo     = False
         self.spoiled        = False
         self.url            = "{}/faf/vault/replay_vault/replay.php?id={}".format(Settings.get('content/host'), self.uid)
 
-        
         self.teams          = {}
         self.access         = None
         self.mod            = None
@@ -115,61 +116,91 @@ class ReplayItem(QtGui.QTreeWidgetItem):
         self.setHidden(True)
         self.extraInfoWidth  = 0  # panel with more information
         self.extraInfoHeight = 0  # panel with more information
-    
-    def update(self, message, client):
-        # Updates this item from the message dictionary supplied #
+
+        self._map_dl_request = DownloadRequest()
+        self._map_dl_request.done.connect(self._on_map_preview_downloaded)
+
+    def update(self, replay, client):
+        """ Updates this item from the message dictionary supplied """
+        self.replay = replay
         
         self.client = client
+        self.name   = replay["name"]
+
+        if "id" in  replay["mapVersion"]:
+            self.mapid     = replay["mapVersion"]["id"]
+            self.mapname   = replay["mapVersion"]["folderName"]
+            self.previewUrlLarge = replay["mapVersion"]["thumbnailUrlLarge"]
+        else:
+            self.mapname = "unknown"
+
+        startDt = datetime.strptime(replay["startTime"], '%Y-%m-%dT%H:%M:%SZ')
+        startDt = startDt.replace(tzinfo=timezone.utc).astimezone(tz=None) #local time
         
-        self.name      = message["name"]
-        self.mapname   = message["map"]
-        self.duration  = time.strftime('%H:%M:%S', time.gmtime(message["duration"]))
-        self.startHour = time.strftime("%H:%M", time.localtime(message['start']))
-        self.startDate = time.strftime("%Y-%m-%d", time.localtime(message['start']))
-        self.mod       = message["mod"]
+        if replay["endTime"] is None:
+            seconds = time.time() - startDt.timestamp()
+            if seconds > 86400:  # more than 24 hours
+                self.duration = "<font color='darkgrey'>end time<br />&nbsp;missing</font>"
+            elif seconds > 7200:  # more than 2 hours
+                self.duration = time.strftime('%H:%M:%S', time.gmtime(seconds)) + "<br />?playing?"
+            elif seconds < 300:  # less than 5 minutes
+                self.duration = time.strftime('%H:%M:%S', time.gmtime(seconds)) + "<br />&nbsp;<font color='darkred'>playing</font>"
+                self.live_delay = True
+            else:
+                self.duration = time.strftime('%H:%M:%S', time.gmtime(seconds)) + "<br />&nbsp;playing"
+        else:
+            endDt   = datetime.strptime(replay["endTime"], '%Y-%m-%dT%H:%M:%SZ')
+            endDt   = endDt.replace(tzinfo=timezone.utc).astimezone(tz=None) #local time
+            self.duration = time.strftime('%H:%M:%S', time.gmtime((endDt - startDt).total_seconds()))
+            
+        self.startHour = startDt.strftime("%H:%M")
+        self.startDate = startDt.strftime("%Y-%m-%d")
+        
+        self.modid     = replay["featuredMod"]["id"]
+        self.mod       = replay["featuredMod"]["technicalName"]
 
         # Map preview code
         self.mapdisplayname = maps.getDisplayName(self.mapname)
       
         self.icon = maps.preview(self.mapname)
         if not self.icon:
-            self.client.downloader.downloadMap(self.mapname, self, True)
-            self.icon = util.icon("games/unknown_map.png")        
+            self.icon = util.THEME.icon("games/unknown_map.png")
+            if self.mapname != "unknown":  
+                self.client.map_downloader.download_preview(self.mapname, self._map_dl_request)
 
         if self.mod in mods:
             self.moddisplayname = mods[self.mod].name 
         else:
             self.moddisplayname = self.mod
 
-#        self.title      = message['title']
-#        self.teams      = message['teams']
-#        self.access     = message.get('access', 'public')
-#        self.mod        = message['featured_mod']
-#        self.host       = message["host"]
-#        self.options    = message.get('options', [])
-#        self.numplayers = message.get('num_players', 0) 
-#        self.slots      = message.get('max_players',12)
+        self.viewtext = self.FORMATTER_REPLAY.format(time=self.startHour, name=self.name, map=self.mapdisplayname,
+                                                     duration=self.duration, mod=self.moddisplayname)
 
-        self.viewtext = (self.FORMATTER_REPLAY.format(time=self.startHour, name=self.name, map = self.mapdisplayname, duration = self.duration, mod = self.moddisplayname))
+    def _on_map_preview_downloaded(self, mapname, result):
+        path, is_local = result
+        self.icon = util.THEME.icon(path, is_local)
+        self.setIcon(0, self.icon)
 
-    def infoPlayers(self, players):
-        # processes information from the server about a replay into readable extra information for the user, #
-        # also calls method to show the information #
-
+    def infoPlayers(self):
+        """ processes information from the server about a replay into readable extra information for the user,
+                also calls method to show the information """
+        
         self.moreInfo = True
-        self.numberplayers = len(players)
+        playersList = self.replay['playerStats']
+        self.numberplayers = len(playersList)
+
         mvpscore = 0
         mvp = None
         scores = {}
 
-        for player in players:  # player highscore
+        for player in playersList:  # player highscore
             if "score" in player:
                 if player["score"] > mvpscore:
                     mvp = player
                     mvpscore = player["score"]
 
-        for player in players:  # player -> teams & playerscore -> teamscore
-            if self.mod == "phantomx" or self.mod == "murderparty":
+        for player in playersList:  # player -> teams & playerscore -> teamscore
+            if self.mod == "phantomx" or self.mod == "murderparty":  # get ffa like into one team
                 team = 1
             else:
                 team = int(player["team"])
@@ -188,13 +219,13 @@ class ReplayItem(QtGui.QTreeWidgetItem):
             self.teams ={}
             scores = {}
             team = 1
-            for player in players:  # player -> team (1)
+            for player in playersList:  # player -> team (1)
                 if team not in self.teams:
                     self.teams[team] = [player]
                 else:
                     self.teams[team].append(player)
 
-        if len(self.teams) == 1 or len(self.teams) == len(players):  # it's FFA
+        if len(self.teams) == 1 or len(self.teams) == len(playersList):  # it's FFA
             self.winner = mvp
         elif len(scores) > 0:  # team highscore
             mvt = 0
@@ -206,10 +237,9 @@ class ReplayItem(QtGui.QTreeWidgetItem):
         self.generateInfoPlayersHtml()
 
     def generateInfoPlayersHtml(self):
-        # Creates the ui and extra information about a replay, #
-        # Either teamWin or winner must be set if the replay is to be spoiled #
+        """  Creates the ui and extra information about a replay,
+             Either teamWin or winner must be set if the replay is to be spoiled """
 
-        observerlist = []
         teams = ""
         winnerHTML = ""
 
@@ -238,7 +268,9 @@ class ReplayItem(QtGui.QTreeWidgetItem):
                     if self.winner is not None:  # FFA in rows: Win ... Lose ....
                         teams += self.FORMATTER_REPLAY_FFA_SPOILED.format(winner=winnerHTML, players=players)
                     else:
-                        if self.teamWin == team:
+                        if "playing" in self.duration:
+                            teamTitle = "Playing"
+                        elif self.teamWin == team:
                             teamTitle = "Win"
                         else:
                             teamTitle = "Lose"
@@ -261,7 +293,7 @@ class ReplayItem(QtGui.QTreeWidgetItem):
 
         self.replayInfo = self.FORMATTER_REPLAY_INFORMATION.format(uid=self.uid, teams=teams)
 
-        if self.isSelected() :
+        if self.isSelected():
             self.parent.replayInfos.clear()
             self.resize()
             self.parent.replayInfos.setHtml(self.replayInfo)
@@ -272,10 +304,11 @@ class ReplayItem(QtGui.QTreeWidgetItem):
         else:
             alignment = "left"
 
-        playerLabel = self.FORMATTER_REPLAY_PLAYER_LABEL.format(player_name=player["name"],
-                                                                player_rating=player["rating"], alignment=alignment)
+        playerLabel = self.FORMATTER_REPLAY_PLAYER_LABEL.format(player_name=player["player"]["login"],
+                                                                player_rating= int(round((player["beforeMean"] - player["beforeDeviation"] * 3)/100) * 100),
+                                                                alignment=alignment)
 
-        iconUrl = os.path.join(util.COMMON_DIR, "replays/%s.png" % self.retrieveIconFaction(player))
+        iconUrl = os.path.join(util.COMMON_DIR, "replays/%s.png" % self.retrieveIconFaction(player, self.mod))
 
         playerIcon = self.FORMATTER_REPLAY_PLAYER_ICON.format(faction_icon_uri=iconUrl)
 
@@ -286,7 +319,8 @@ class ReplayItem(QtGui.QTreeWidgetItem):
 
         return alignment, playerIcon, playerLabel, playerScore
 
-    def retrieveIconFaction(self, player):  # Factions does not contain Nomads
+    @staticmethod
+    def retrieveIconFaction(player, mod):
         if "faction" in player:
             if player["faction"] == 1:
                 faction = "UEF"
@@ -297,9 +331,19 @@ class ReplayItem(QtGui.QTreeWidgetItem):
             elif player["faction"] == 4:
                 faction = "Seraphim"
             elif player["faction"] == 5:
-                faction = "Nomads"
+                if mod == "nomads":
+                    faction = "Nomads"
+                else:
+                    faction = "Random"
+            elif player["faction"] == 6:
+                if mod == "nomads":
+                    faction = "Random"
+                else:
+                    faction = "Broken"
             else:
                 faction = "Broken"
+        else:
+            faction = "Missing"
         return faction
 
     def resize(self):
@@ -322,12 +366,12 @@ class ReplayItem(QtGui.QTreeWidgetItem):
             self.parent.replayInfos.setMaximumHeight(self.extraInfoHeight)
 
     def pressed(self, item):
-        menu = QtGui.QMenu(self.parent)
-        actionDownload = QtGui.QAction("Download replay", menu)
+        menu = QtWidgets.QMenu(self.parent)
+        actionDownload = QtWidgets.QAction("Download replay", menu)
         actionDownload.triggered.connect(self.downloadReplay)
         menu.addAction(actionDownload)
         menu.popup(QtGui.QCursor.pos())
-        
+
     def downloadReplay(self):
         QtGui.QDesktopServices.openUrl(QtCore.QUrl(self.url))
 
@@ -335,17 +379,17 @@ class ReplayItem(QtGui.QTreeWidgetItem):
         if column == 0:
             return self.viewtext
         if column == 1:
-            return self.viewtext   
- 
+            return self.viewtext
+
     def data(self, column, role):
         if role == QtCore.Qt.DisplayRole:
-            return self.display(column)  
+            return self.display(column)
         elif role == QtCore.Qt.UserRole:
             return self
         return super(ReplayItem, self).data(column, role)
- 
+
     def permutations(self, items):
-        # Yields all permutations of the items. #
+        """  Yields all permutations of the items. """
         if items is []:
             yield []
         else:
@@ -354,11 +398,11 @@ class ReplayItem(QtGui.QTreeWidgetItem):
                     yield [items[i]] + j
 
     def __ge__(self, other):
-        # Comparison operator used for item list sorting #
+        """  Comparison operator used for item list sorting """
         return not self.__lt__(other)
 
     def __lt__(self, other):
-        # Comparison operator used for item list sorting #
+        """ Comparison operator used for item list sorting """
         if not self.client: return True  # If not initialized...
         if not other.client: return False
         # Default: uid

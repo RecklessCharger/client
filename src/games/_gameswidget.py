@@ -1,25 +1,23 @@
 from functools import partial
 import random
 
-from PyQt4 import QtCore, QtGui
-from PyQt4.QtCore import Qt
+from PyQt5 import QtWidgets
+from PyQt5.QtGui import QDesktopServices
+from PyQt5.QtCore import QUrl, pyqtSlot
 
 import util
+from api.featured_mod_api import FeaturedModApiConnector
 from config import Settings
-from games.gameitem import GameItem, GameItemDelegate
-from games.moditem import ModItem, mod_invisible, mods
-from games.hostgamewidget import HostgameWidget
+from games.moditem import ModItem, mod_invisible
+from games.gamemodel import CustomGameFilterModel
 from fa.factions import Factions
 import fa
-import modvault
-import notifications as ns
-from config import Settings
 
 import logging
 
 logger = logging.getLogger(__name__)
 
-FormClass, BaseClass = util.loadUiType("games/games.ui")
+FormClass, BaseClass = util.THEME.loadUiType("games/games.ui")
 
 
 class GamesWidget(FormClass, BaseClass):
@@ -29,20 +27,22 @@ class GamesWidget(FormClass, BaseClass):
     sort_games_index = Settings.persisted_property(
         "play/sortGames", default_value=0, type=int)  # Default is by player count
     sub_factions = Settings.persisted_property(
-        "play/subFactions", default_value=['false', 'false', 'false', 'false'])
+        "play/subFactions", default_value=[False, False, False, False])
 
-    def __init__(self, client, *args, **kwargs):
-        BaseClass.__init__(self, *args, **kwargs)
-
+    def __init__(self, client, game_model, me, gameview_builder, game_launcher):
+        BaseClass.__init__(self)
         self.setupUi(self)
 
-        self.client = client
-        self.client.gamesTab.layout().addWidget(self)
-
+        self._me = me
+        self.client = client  # type: ClientWindow
         self.mods = {}
+        self._game_model = CustomGameFilterModel(self._me, game_model)
+        self._game_launcher = game_launcher
 
-        # Dictionary containing our actual games.
-        self.games = {}
+        self.apiConnector = FeaturedModApiConnector(self.client.lobby_dispatch)
+
+        self.gameview = gameview_builder(self._game_model, self.gameList)
+        self.gameview.game_double_clicked.connect(self.gameDoubleClicked)
 
         # Ranked search UI
         self._ranked_icons = {
@@ -51,10 +51,13 @@ class GamesWidget(FormClass, BaseClass):
             Factions.SERAPHIM: self.rankedSeraphim,
             Factions.UEF: self.rankedUEF,
         }
-        self.rankedAeon.setIcon(util.icon("games/automatch/aeon.png"))
-        self.rankedCybran.setIcon(util.icon("games/automatch/cybran.png"))
-        self.rankedSeraphim.setIcon(util.icon("games/automatch/seraphim.png"))
-        self.rankedUEF.setIcon(util.icon("games/automatch/uef.png"))
+        self.rankedAeon.setIcon(util.THEME.icon("games/automatch/aeon.png"))
+        self.rankedCybran.setIcon(util.THEME.icon("games/automatch/cybran.png"))
+        self.rankedSeraphim.setIcon(util.THEME.icon("games/automatch/seraphim.png"))
+        self.rankedUEF.setIcon(util.THEME.icon("games/automatch/uef.png"))
+
+        # Fixup ini file type loss
+        self.sub_factions = [True if x == 'true' else False for x in self.sub_factions]
 
         self.searchProgress.hide()
 
@@ -65,20 +68,22 @@ class GamesWidget(FormClass, BaseClass):
 
         self.generateSelectSubset()
 
-        self.client.modInfo.connect(self.processModInfo)
-        self.client.gameInfo.connect(self.processGameInfo)
-        self.client.disconnected.connect(self.clear_games)
+        self.client.lobby_info.modInfo.connect(self.processModInfo)
 
-        self.client.gameEnter.connect(self.stopSearchRanked)
-        self.client.viewingReplay.connect(self.stopSearchRanked)
+        self.client.game_enter.connect(self.stopSearchRanked)
+        self.client.viewing_replay.connect(self.stopSearchRanked)
 
-        self.gameList.setItemDelegate(GameItemDelegate(self))
-        self.gameList.itemDoubleClicked.connect(self.gameDoubleClicked)
-        self.gameList.sortBy = self.sort_games_index  # Default Sorting is By Players count
-
-        self.sortGamesComboBox.addItems(['By Players', 'By Game Quality', 'By avg. Player Rating'])
+        self.sortGamesComboBox.addItems(['By Players', 'By avg. Player Rating', 'By Map', 'By Host', 'By Age'])
         self.sortGamesComboBox.currentIndexChanged.connect(self.sortGamesComboChanged)
-        self.sortGamesComboBox.setCurrentIndex(self.sort_games_index)
+        try:
+            CustomGameFilterModel.SortType(self.sort_games_index)
+            safe_sort_index = self.sort_games_index
+        except ValueError:
+            safe_sort_index = 0
+        # This only triggers the signal if the index actually changes,
+        # so let's initialize it ourselves
+        self.sortGamesComboBox.setCurrentIndex(safe_sort_index)
+        self.sortGamesComboChanged(safe_sort_index)
 
         self.hideGamesWithPw.stateChanged.connect(self.togglePrivateGames)
         self.hideGamesWithPw.setChecked(self.hide_private_games)
@@ -86,13 +91,13 @@ class GamesWidget(FormClass, BaseClass):
         self.modList.itemDoubleClicked.connect(self.hostGameClicked)
 
         self.updatePlayButton()
+        self.apiConnector.requestData()
 
-
-    @QtCore.pyqtSlot(dict)
+    @pyqtSlot(dict)
     def processModInfo(self, message):
-        '''
+        """
         Slot that interprets and propagates mod_info messages into the mod list
-        '''
+        """
         mod = message['name']
         old_mod = self.mods.get(mod, None)
         self.mods[mod] = ModItem(message)
@@ -112,20 +117,22 @@ class GamesWidget(FormClass, BaseClass):
 
         self.client.replays.modList.addItem(message["name"])
 
-    @QtCore.pyqtSlot(int)
+    @pyqtSlot(int)
     def togglePrivateGames(self, state):
         self.hide_private_games = state
-
-        for game in [self.games[game] for game in self.games if self.games[game].state == 'open' and self.games[game].password_protected]:
-            game.setHidden(state == Qt.Checked)
+        self._game_model.hide_private_games = state
 
     def selectFaction(self, enabled, factionID=0):
+        logger.debug('selectFaction: enabled={}, factionID={}'.format(enabled, factionID))
         if len(self.sub_factions) < factionID:
+            logger.warning('selectFaction: len(self.sub_factions) < factionID, aborting')
             return
 
-        self.sub_factions[factionID-1] = 'true' if enabled else 'false'
+        logger.debug('selectFaction: selected was {}'.format(self.sub_factions))
+        self.sub_factions[factionID-1] = enabled
 
         Settings.set("play/subFactions", self.sub_factions)
+        logger.debug('selectFaction: selected is {}'.format(self.sub_factions))
 
         if self.searching:
             self.stopSearchRanked()
@@ -133,9 +140,9 @@ class GamesWidget(FormClass, BaseClass):
         self.updatePlayButton()
 
     def startSubRandomRankedSearch(self):
-        '''
+        """
         This is a wrapper around startRankedSearch where a faction will be chosen based on the selected checkboxes
-        '''
+        """
         if self.searching:
             self.stopSearchRanked()
         else:
@@ -158,61 +165,32 @@ class GamesWidget(FormClass, BaseClass):
                 self.startSearchRanked(Factions.from_name(
                     factionSubset[random.randint(0, l - 1)]))
 
+    def startViewLadderMapsPool(self):
+        QDesktopServices.openUrl(QUrl(Settings.get("MAPPOOL_URL")))
+
     def generateSelectSubset(self):
         if self.searching:  # you cannot search for a match while changing/creating the UI
             self.stopSearchRanked()
 
         self.rankedPlay.clicked.connect(self.startSubRandomRankedSearch)
         self.rankedPlay.show()
-        self.labelRankedHint.hide()
-        self.labelSubsetRankedHint.show()
-        for faction, icon in self._ranked_icons.items():
+        self.laddermapspool.clicked.connect(self.startViewLadderMapsPool)
+        self.labelRankedHint.show()
+        for faction, icon in list(self._ranked_icons.items()):
             try:
                 icon.clicked.disconnect()
             except TypeError:
                 pass
 
-            icon.setChecked(self.sub_factions[faction.value-1] == 'true')
+            icon.setChecked(self.sub_factions[faction.value-1])
             icon.clicked.connect(partial(self.selectFaction, factionID=faction.value))
-
-    @QtCore.pyqtSlot()
-    def clear_games(self):
-        self.games = {}
-        self.gameList.clear()
-
-    @QtCore.pyqtSlot(dict)
-    def processGameInfo(self, message):
-        '''
-        Slot that interprets and propagates game_info messages into GameItems
-        '''
-        uid = message["uid"]
-
-        if uid not in self.games:
-            self.games[uid] = GameItem(uid)
-            self.gameList.addItem(self.games[uid])
-            self.games[uid].update(message, self.client)
-
-            if message['state'] == 'open' and not message['password_protected']:
-                self.client.notificationSystem.on_event(ns.Notifications.NEW_GAME, message)
-        else:
-            self.games[uid].update(message, self.client)
-
-        # Hide private games
-        if self.hideGamesWithPw.isChecked() and message['state'] == 'open' and message['password_protected']:
-            self.games[uid].setHidden(True)
-
-        # Special case: removal of a game that has ended
-        if message['state'] == "closed":
-            if uid in self.games:
-                self.gameList.takeItem(self.gameList.row(self.games[uid]))
-                del self.games[uid]
 
     def updatePlayButton(self):
         if self.searching:
             s = "Stop search"
         else:
-            c = self.sub_factions.count('true')
-            if c in [0, 4]:
+            c = self.sub_factions.count(True)
+            if c in [0, 4]:  # all or none selected
                 s = "Play as random!"
             else:
                 s = "Play!"
@@ -224,7 +202,7 @@ class GamesWidget(FormClass, BaseClass):
             race = Factions.get_random_faction()
 
         if fa.instance.running():
-            QtGui.QMessageBox.information(
+            QtWidgets.QMessageBox.information(
                 None, "ForgedAllianceForever.exe", "FA is already running.")
             self.stopSearchRanked()
             return
@@ -237,35 +215,29 @@ class GamesWidget(FormClass, BaseClass):
         if self.searching:
             logger.info("Switching Ranked Search to Race " + str(race))
             self.race = race
-            self.client.send(dict(command="game_matchmaking", mod="ladder1v1", state="settings",
+            self.client.lobby_connection.send(dict(command="game_matchmaking", mod="ladder1v1", state="settings",
                                   faction=self.race.value))
         else:
-            # Experimental UPnP Mapper - mappings are removed on app exit
-            if self.client.useUPnP:
-                fa.upnp.createPortMapping(self.client.localIP, self.client.gamePort, "UDP")
-
-            logger.info("Starting Ranked Search as " + str(race) +
-                        ", port: " + str(self.client.gamePort))
+            logger.info("Starting Ranked Search as " + str(race))
             self.searching = True
             self.race = race
             self.searchProgress.setVisible(True)
             self.labelAutomatch.setText("Searching...")
-            self.updatePlayButton();
+            self.updatePlayButton()
             self.client.search_ranked(faction=self.race.value)
 
-    @QtCore.pyqtSlot()
+    @pyqtSlot()
     def stopSearchRanked(self, *args):
         if self.searching:
             logger.debug("Stopping Ranked Search")
-            self.client.send(dict(command="game_matchmaking", mod="ladder1v1", state="stop"))
+            self.client.lobby_connection.send(dict(command="game_matchmaking", mod="ladder1v1", state="stop"))
             self.searching = False
 
         self.updatePlayButton()
         self.searchProgress.setVisible(False)
         self.labelAutomatch.setText("1 vs 1 Automatch")
 
-
-    @QtCore.pyqtSlot(bool)
+    @pyqtSlot(bool)
     def toggle_search(self, enabled, race=None):
         """
         Handler called when a ladder search button is pressed. They're really checkboxes, and the
@@ -278,11 +250,10 @@ class GamesWidget(FormClass, BaseClass):
         else:
             self.stopSearchRanked()
 
-    @QtCore.pyqtSlot(QtGui.QListWidgetItem)
-    def gameDoubleClicked(self, item):
-        '''
+    def gameDoubleClicked(self, game):
+        """
         Slot that attempts to join a game.
-        '''
+        """
         if not fa.instance.available():
             return
 
@@ -291,31 +262,25 @@ class GamesWidget(FormClass, BaseClass):
         if not fa.check.game(self.client):
             return
 
-        if fa.check.check(item.mod, mapname=item.mapname, version=None, sim_mods=item.mods):
-            if item.password_protected:
-                passw, ok = QtGui.QInputDialog.getText(
-                    self.client, "Passworded game", "Enter password :", QtGui.QLineEdit.Normal, "")
+        if fa.check.check(game.featured_mod, mapname=game.mapname, version=None, sim_mods=game.sim_mods):
+            if game.password_protected:
+                passw, ok = QtWidgets.QInputDialog.getText(
+                    self.client, "Passworded game", "Enter password :", QtWidgets.QLineEdit.Normal, "")
                 if ok:
-                    self.client.join_game(uid=item.uid, password=passw)
+                    self.client.join_game(uid=game.uid, password=passw)
             else:
-                self.client.join_game(uid=item.uid)
+                self.client.join_game(uid=game.uid)
 
-    @QtCore.pyqtSlot(QtGui.QListWidgetItem)
+    @pyqtSlot(QtWidgets.QListWidgetItem)
     def hostGameClicked(self, item):
-        '''
+        """
         Hosting a game event
-        '''
+        """
         if not fa.instance.available():
             return
-
         self.stopSearchRanked()
-
-        hostgamewidget = HostgameWidget(self, item)
-        # Abort if the client cancelled the host game dialogue.
-        if hostgamewidget.exec_() != 1:
-            return
+        self._game_launcher.host_game(item.name, item.mod)
 
     def sortGamesComboChanged(self, index):
         self.sort_games_index = index
-        self.gameList.sortBy = index
-        self.gameList.sortItems()
+        self._game_model.sort_type = CustomGameFilterModel.SortType(index)

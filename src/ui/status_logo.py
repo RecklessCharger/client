@@ -1,5 +1,5 @@
-from PyQt4.QtCore import pyqtSignal
-from PyQt4.QtGui import QLabel, QAction, QMenu
+from PyQt5.QtCore import pyqtSignal
+from PyQt5.QtWidgets import QLabel, QAction, QMenu
 import util
 from client import ClientState
 
@@ -7,30 +7,39 @@ from client import ClientState
 class StatusLogo(QLabel):
     disconnect_requested = pyqtSignal()
     reconnect_requested = pyqtSignal()
+    chat_reconnect_requested = pyqtSignal()
     about_dialog_requested = pyqtSignal()
     connectivity_dialog_requested = pyqtSignal()
 
-    def __init__(self, client, logo_file='window_icon.png'):
+    def __init__(self, client, chat_model, logo_file='window_icon.png'):
         QLabel.__init__(self)
 
+        self._chat_model = chat_model
         self.state = client.state
         self.setScaledContents(True)
         self.setMargin(3)
 
-        normal, yellow, red = map(util.pixmap, [
+        normal, yellow, red = list(map(util.THEME.pixmap, [
             'window_icon.png',
             'window_icon_yellow.png',
             'window_icon_red.png'
-        ])
+        ]))
 
         self._pixmaps = {
-            ClientState.ONLINE: normal,
-            ClientState.ACCEPTED: yellow,
-            ClientState.CREATED: yellow,
-            ClientState.RECONNECTING: yellow,
-            ClientState.DROPPED: yellow,
+            ClientState.SHUTDOWN: red,
+            ClientState.NONE: red,
             ClientState.DISCONNECTED: red,
-            ClientState.NONE: red
+            ClientState.CONNECTING: yellow,
+            ClientState.CONNECTED: normal,
+            ClientState.LOGGED_IN: normal,
+        }
+        self._tooltips = {
+            ClientState.SHUTDOWN: "Shutting down",
+            ClientState.NONE: "Unknown",
+            ClientState.DISCONNECTED: "Disconnected",
+            ClientState.CONNECTING: "Connecting",
+            ClientState.CONNECTED: "Connected",
+            ClientState.LOGGED_IN: "Logged in",
         }
         self.setMaximumSize(30, 30)
 
@@ -42,14 +51,21 @@ class StatusLogo(QLabel):
 
         dc = QAction('Disconnect', None)
         rc = QAction('Reconnect', None)
+        crc = QAction('Reconnect with chat', None)
+        conn = QAction('Connectivity', None)
         about = QAction('About', None)
 
         if self.state != ClientState.DISCONNECTED:
             menu.addAction(dc)
-        if self.state != ClientState.ONLINE\
-            and self.state != ClientState.RECONNECTING:
+            if not self._chat_model.connected:
+                menu.addAction(crc)
+        if self.state not in [
+                ClientState.CONNECTING,
+                ClientState.CONNECTED,
+                ClientState.LOGGED_IN]:
             menu.addAction(rc)
 
+        menu.addAction(conn)
         menu.addAction(about)
 
         action = menu.exec_(self.mapToGlobal(event.pos()))
@@ -57,16 +73,14 @@ class StatusLogo(QLabel):
             self.disconnect_requested.emit()
         elif action == rc:
             self.reconnect_requested.emit()
+        elif action == crc:
+            self.chat_reconnect_requested.emit()
+        elif action == conn:
+            self.connectivity_dialog_requested.emit()
         elif action == about:
             self.about_dialog_requested.emit()
 
     def change_state(self, state):
         self.state = state
-        self.setPixmap(self._pixmaps.get(state, self._pixmaps[ClientState.DROPPED]))
-
-        if state == ClientState.ONLINE:
-            self.setToolTip("Online")
-        elif state == ClientState.RECONNECTING or state == ClientState.DROPPED:
-            self.setToolTip("Reconnecting")
-        else:
-            self.setToolTip("Offline")
+        self.setPixmap(self._pixmaps[state])
+        self.setToolTip(self._tooltips[state])

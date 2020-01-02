@@ -1,7 +1,4 @@
 
-
-
-
 # Copyright (C) 1999--2002  Joel Rosdahl
 #
 # This library is free software; you can redistribute it and/or
@@ -22,7 +19,7 @@
 #
 # $Id: irclib.py,v 1.47 2008/09/25 22:00:59 keltus Exp $
 
-"""irclib -- Internet Relay Chat (IRC) protocol client library.
+""" irclib -- Internet Relay Chat (IRC) protocol client library.
 
 This library is intended to encapsulate the IRC protocol at a quite
 low level.  It provides an event-driven IRC client framework.  It has
@@ -71,7 +68,6 @@ import select
 import socket
 import string
 import time
-import types
 import ssl
 import logging
 
@@ -93,8 +89,10 @@ DEBUG = 0
 # ERROR from the server triggers the error event and the disconnect event.
 # dropping of the connection triggers the disconnect event.
 
+
 class IRCError(Exception):
     """Represents an IRC exception."""
+
 
 class IRC:
     """Class that handles one or several IRC server connections.
@@ -160,7 +158,7 @@ class IRC:
         self.fn_to_add_timeout = fn_to_add_timeout
         self.connections = []
         self.handlers = {}
-        self.delayed_commands = [] # list of tuples in the format (time, function, arguments)
+        self.delayed_commands = []  # list of tuples in the format (time, function, arguments)
 
         self.add_global_handler("ping", _ping_ponger, -42)
 
@@ -198,7 +196,7 @@ class IRC:
             else:
                 break
 
-    def process_once(self, timeout=0):
+    def process_once(self, timeout=0.0):
         """Process data from connections once.
 
         Arguments:
@@ -210,8 +208,8 @@ class IRC:
         incoming data, if there are any.  If that seems boring, look
         at the process_forever method.
         """
-        sockets = map(lambda x: x._get_socket(), self.connections)
-        sockets = filter(lambda x: x != None, sockets)
+        sockets = [x._get_socket() for x in self.connections]
+        sockets = [x for x in sockets if x is not None]
         if sockets:
             (i, o, e) = select.select(sockets, [], [], timeout)
             self.process_data(i)
@@ -255,9 +253,9 @@ class IRC:
         number is highest priority).  If a handler function returns
         \"NO MORE\", no more handlers will be called.
         """
-        if not event in self.handlers:
+        if event not in self.handlers:
             self.handlers[event] = []
-        bisect.insort(self.handlers[event], ((priority, handler)))
+        bisect.insort(self.handlers[event], (priority, handler))
 
     def remove_global_handler(self, event, handler):
         """Removes a global handler function.
@@ -270,7 +268,7 @@ class IRC:
 
         Returns 1 on success, otherwise 0.
         """
-        if not event in self.handlers:
+        if event not in self.handlers:
             return 0
         for h in self.handlers[event]:
             if handler == h[1]:
@@ -334,6 +332,7 @@ class IRC:
 
 _rfc_1459_command_regexp = re.compile("^(:(?P<prefix>[^ ]+) +)?(?P<command>[^ ]+)( *(?P<argument> .+))?")
 
+
 class Connection:
     """Base class for IRC connections.
 
@@ -343,10 +342,10 @@ class Connection:
         self.irclibobj = irclibobj
 
     def _get_socket(self):
-        raise IRCError, "Not overridden"
+        raise IRCError("Not overridden")
 
     ##############################
-    ### Convenience wrappers.
+    #  Convenience wrappers.
 
     def execute_at(self, at, function, arguments=()):
         self.irclibobj.execute_at(at, function, arguments)
@@ -358,13 +357,15 @@ class Connection:
 class ServerConnectionError(IRCError):
     pass
 
+
 class ServerNotConnectedError(ServerConnectionError):
     pass
 
 
 # Huh!?  Crrrrazy EFNet doesn't follow the RFC: their ircd seems to
 # use \n as message separator!  :P
-_linesep_regexp = re.compile("\r?\n")
+_linesep_regexp = re.compile(b"\r?\n")
+
 
 class ServerConnection(Connection):
     """This class represents an IRC server connection.
@@ -412,7 +413,7 @@ class ServerConnection(Connection):
         if self.connected:
             self.disconnect("Changing servers")
 
-        self.previous_buffer = ""
+        self.previous_buffer = b""
         self.handlers = {}
         self.real_server_name = ""
         self.real_nickname = nickname
@@ -437,10 +438,10 @@ class ServerConnection(Connection):
                 self.ssl.settimeout(0.0)
             else:
                 self.socket.settimeout(0.0)
-        except socket.error, x:
+        except socket.error as x:
             self.socket.close()
             self.socket = None
-            raise ServerConnectionError, "Couldn't connect to socket: %s" % x
+            raise ServerConnectionError("Couldn't connect to socket: %s" % x)
         self.connected = 1
         if self.irclibobj.fn_to_add_socket:
             self.irclibobj.fn_to_add_socket(self.socket)
@@ -509,15 +510,15 @@ class ServerConnection(Connection):
 
         for line in lines:
             if DEBUG:
-                print "FROM SERVER:", line
+                print("FROM SERVER:", line)
 
             if not line:
                 continue
 
             try:
-                line = line.decode("utf-8", "replace")     # utf-8 support hacked in by thygrrr (may break in some scenarios - see chardet python package)
+                line = line.decode("utf-8", "replace")   # utf-8 support hacked in by thygrrr (may break in some scenarios - see chardet python package)
             except:            
-                print "irclib: non-utf-8 line, unexpected encoding error " + line
+                print("irclib: non-utf-8 line, unexpected encoding error " + line)
                 line = "** encoding error - replaced by irclib.py **"
                 
             prefix = None
@@ -569,7 +570,7 @@ class ServerConnection(Connection):
                         command = "privnotice"
 
                 for m in messages:
-                    if type(m) is types.TupleType:
+                    if type(m) is tuple:
                         if command in ["privmsg", "pubmsg"]:
                             command = "ctcp"
                         else:
@@ -577,15 +578,15 @@ class ServerConnection(Connection):
 
                         m = list(m)
                         if DEBUG:
-                            print "command: %s, source: %s, target: %s, arguments: %s" % (
-                                command, prefix, target, m)
+                            print("command: %s, source: %s, target: %s, arguments: %s" % (
+                                command, prefix, target, m))
                         self._handle_event(Event(command, prefix, target, m))
                         if command == "ctcp" and m[0] == "ACTION":
                             self._handle_event(Event("action", prefix, target, m[1:]))
                     else:
                         if DEBUG:
-                            print "command: %s, source: %s, target: %s, arguments: %s" % (
-                                command, prefix, target, [m])
+                            print("command: %s, source: %s, target: %s, arguments: %s" % (
+                                command, prefix, target, [m]))
                         self._handle_event(Event(command, prefix, target, [m]))
             else:
                 target = None
@@ -603,8 +604,8 @@ class ServerConnection(Connection):
                         command = "umode"
 
                 if DEBUG:
-                    print "command: %s, source: %s, target: %s, arguments: %s" % (
-                        command, prefix, target, arguments)
+                    print("command: %s, source: %s, target: %s, arguments: %s" % (
+                        command, prefix, target, arguments))
                 self._handle_event(Event(command, prefix, target, arguments))
 
     def _handle_event(self, event):
@@ -671,7 +672,7 @@ class ServerConnection(Connection):
 
         try:
             self.socket.close()
-        except socket.error, x:
+        except socket.error as x:
             pass
         self.socket = None
         self._handle_event(Event("disconnect", self.server, "", [message]))
@@ -754,7 +755,7 @@ class ServerConnection(Connection):
 
     def part(self, channels, message=""):
         """Send a PART command."""
-        if type(channels) == types.StringType:
+        if type(channels) == bytes:
             self.send_raw("PART " + channels + (message and (" " + message)))
         else:
             self.send_raw("PART " + ",".join(channels) + (message and (" " + message)))
@@ -793,21 +794,21 @@ class ServerConnection(Connection):
         The string will be padded with appropriate CR LF.
         """
         if self.socket is None:
-            raise ServerNotConnectedError, "Not connected."
+            raise ServerNotConnectedError("Not connected.")
         try:
             if self.ssl:
                 self.ssl.write((string + "\r\n").encode("utf-8"))     #FIXME utf-8 support hacked in by thygrrrc(may break in some scenarios)
             else:
                 self.socket.send((string + "\r\n").encode("utf-8"))   #FIXME utf-8 support hacked in by thygrrr (may break in some scenarios)
             if DEBUG:
-                print "TO SERVER:", string
-        except socket.error, x:
+                print("TO SERVER:", string)
+        except socket.error as x:
             # Ouch!
             self.disconnect("Connection reset by peer.")
 
     def squit(self, server, comment=""):
         """Send an SQUIT command."""
-        self.send_raw("SQUIT %s%s" % (server, comment and (u" :" + comment)))
+        self.send_raw("SQUIT %s%s" % (server, comment and (" :" + comment)))
 
     def stats(self, statstype, server=""):
         """Send a STATS command."""
@@ -815,7 +816,7 @@ class ServerConnection(Connection):
 
     def time(self, server=""):
         """Send a TIME command."""
-        self.send_raw("TIME" + (server and (u" " + server)))
+        self.send_raw("TIME" + (server and (" " + server)))
 
     def topic(self, channel, new_topic=None):
         """Send a TOPIC command."""
@@ -862,6 +863,7 @@ class ServerConnection(Connection):
                                          max and (" " + max),
                                          server and (" " + server)))
 
+
 class DCCConnectionError(IRCError):
     pass
 
@@ -893,14 +895,14 @@ class DCCConnection(Connection):
         self.peeraddress = socket.gethostbyname(address)
         self.peerport = port
         self.socket = None
-        self.previous_buffer = ""
+        self.previous_buffer = b""
         self.handlers = {}
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.passive = 0
         try:
             self.socket.connect((self.peeraddress, self.peerport))
-        except socket.error, x:
-            raise DCCConnectionError, "Couldn't connect to socket: %s" % x
+        except socket.error as x:
+            raise DCCConnectionError("Couldn't connect to socket: %s" % x)
         self.connected = 1
         if self.irclibobj.fn_to_add_socket:
             self.irclibobj.fn_to_add_socket(self.socket)
@@ -916,7 +918,7 @@ class DCCConnection(Connection):
         peer, the peer address and port are available as
         self.peeraddress and self.peerport.
         """
-        self.previous_buffer = ""
+        self.previous_buffer = b""
         self.handlers = {}
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.passive = 1
@@ -924,8 +926,8 @@ class DCCConnection(Connection):
             self.socket.bind((socket.gethostbyname(socket.gethostname()), 0))
             self.localaddress, self.localport = self.socket.getsockname()
             self.socket.listen(10)
-        except socket.error, x:
-            raise DCCConnectionError, "Couldn't bind socket: %s" % x
+        except socket.error as x:
+            raise DCCConnectionError("Couldn't bind socket: %s" % x)
         return self
 
     def disconnect(self, message=""):
@@ -941,7 +943,7 @@ class DCCConnection(Connection):
         self.connected = 0
         try:
             self.socket.close()
-        except socket.error, x:
+        except socket.error as x:
             pass
         self.socket = None
         self.irclibobj._handle_event(
@@ -958,8 +960,8 @@ class DCCConnection(Connection):
             self.socket = conn
             self.connected = 1
             if DEBUG:
-                print "DCC connection from %s:%d" % (
-                    self.peeraddress, self.peerport)
+                print("DCC connection from %s:%d" % (
+                    self.peeraddress, self.peerport))
             self.irclibobj._handle_event(
                 self,
                 Event("dcc_connect", self.peeraddress, None, None))
@@ -967,7 +969,7 @@ class DCCConnection(Connection):
 
         try:
             new_data = self.socket.recv(2**14)
-        except socket.error, x:
+        except socket.error as x:
             # The server hung up.
             self.disconnect("Connection reset by peer")
             return
@@ -996,11 +998,11 @@ class DCCConnection(Connection):
         target = None
         for chunk in chunks:
             if DEBUG:
-                print "FROM PEER:", chunk
+                print("FROM PEER:", chunk)
             arguments = [chunk]
             if DEBUG:
-                print "command: %s, source: %s, target: %s, arguments: %s" % (
-                    command, prefix, target, arguments)
+                print("command: %s, source: %s, target: %s, arguments: %s" % (
+                    command, prefix, target, arguments))
             self.irclibobj._handle_event(
                 self,
                 Event(command, prefix, target, arguments))
@@ -1020,10 +1022,11 @@ class DCCConnection(Connection):
             if self.dcctype == "chat":
                 self.socket.send("\n")
             if DEBUG:
-                print "TO PEER: %s\n" % string
-        except socket.error, x:
+                print("TO PEER: %s\n" % string)
+        except socket.error as x:
             # Ouch!
             self.disconnect("Connection reset by peer.")
+
 
 class SimpleIRCClient:
     """A simple single-server IRC client class.
@@ -1188,6 +1191,7 @@ _low_level_mapping = {
 
 _low_level_regexp = re.compile(_LOW_LEVEL_QUOTE + "(.)")
 
+
 def mask_matches(nick, mask):
     """Check if a nick matches a mask.
 
@@ -1205,8 +1209,9 @@ def mask_matches(nick, mask):
 
 _special = "-[]\\`^{}"
 nick_characters = string.ascii_letters + string.digits + _special
-_ircstring_translation = string.maketrans(string.ascii_uppercase + "[]\\^",
-                                          string.ascii_lowercase + "{}|~")
+_ircstring_translation = str.maketrans(string.ascii_uppercase + "[]\\^",
+                                       string.ascii_lowercase + "{}|~")
+
 
 def irc_lower(s):
     """Returns a lowercased string.
@@ -1215,6 +1220,7 @@ def irc_lower(s):
     1459).
     """
     return s.translate(_ircstring_translation)
+
 
 def _ctcp_dequote(message):
     """[Internal] Dequote a message according to CTCP specifications.
@@ -1270,6 +1276,7 @@ def _ctcp_dequote(message):
 
         return messages
 
+
 def is_channel(string):
     """Check if a string is a channel name.
 
@@ -1277,24 +1284,27 @@ def is_channel(string):
     """
     return string and string[0] in "#&+!"
 
+
 def ip_numstr_to_quad(num):
     """Convert an IP number as an integer given in ASCII
     representation (e.g. '3232235521') to an IP address string
     (e.g. '192.168.0.1')."""
-    n = long(num)
-    p = map(str, map(int, [n >> 24 & 0xFF, n >> 16 & 0xFF,
-                           n >> 8 & 0xFF, n & 0xFF]))
+    n = int(num)
+    p = list(map(str, list(map(int, [n >> 24 & 0xFF, n >> 16 & 0xFF,
+                           n >> 8 & 0xFF, n & 0xFF]))))
     return ".".join(p)
+
 
 def ip_quad_to_numstr(quad):
     """Convert an IP address string (e.g. '192.168.0.1') to an IP
     number as an integer given in ASCII representation
     (e.g. '3232235521')."""
-    p = map(long, quad.split("."))
+    p = list(map(int, quad.split(".")))
     s = str((p[0] << 24) | (p[1] << 16) | (p[2] << 8) | p[3])
     if s[-1] == "L":
         s = s[:-1]
     return s
+
 
 def nm_to_n(s):
     """Get the nick part of a nickmask.
@@ -1303,12 +1313,14 @@ def nm_to_n(s):
     """
     return s.split("!")[0]
 
+
 def nm_to_uh(s):
     """Get the userhost part of a nickmask.
 
     (The source of an Event is a nickmask.)
     """
     return s.split("!")[1]
+
 
 def nm_to_h(s):
     """Get the host part of a nickmask.
@@ -1317,6 +1329,7 @@ def nm_to_h(s):
     """
     return s.split("@")[1]
 
+
 def nm_to_u(s):
     """Get the user part of a nickmask.
 
@@ -1324,6 +1337,7 @@ def nm_to_u(s):
     """
     s = s.split("!")[1]
     return s.split("@")[0]
+
 
 def parse_nick_modes(mode_string):
     """Parse a nick mode string.
@@ -1340,6 +1354,7 @@ def parse_nick_modes(mode_string):
 
     return _parse_modes(mode_string, "")
 
+
 def parse_channel_modes(mode_string):
     """Parse a channel mode string.
 
@@ -1354,6 +1369,7 @@ def parse_channel_modes(mode_string):
     """
 
     return _parse_modes(mode_string, "bklvo")
+
 
 def _parse_modes(mode_string, unary_modes=""):
     """[Internal]"""
@@ -1385,6 +1401,7 @@ def _parse_modes(mode_string, unary_modes=""):
         else:
             modes.append([sign, ch, None])
     return modes
+
 
 def _ping_ponger(connection, event):
     """[Internal]"""
@@ -1579,4 +1596,4 @@ protocol_events = [
     "pong",
 ]
 
-all_events = generated_events + protocol_events + numeric_events.values()
+all_events = generated_events + protocol_events + list(numeric_events.values())

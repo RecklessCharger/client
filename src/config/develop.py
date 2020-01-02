@@ -1,7 +1,6 @@
 import os
-import logging
 
-from production import defaults as production_defaults
+from .production import defaults as production_defaults
 
 # These directories are in Appdata (e.g. C:\ProgramData on some Win7 versions)
 if 'ALLUSERSPROFILE' in os.environ:
@@ -11,3 +10,5 @@ else:
 
 defaults = production_defaults.copy()
 defaults['host'] = 'test.faforever.com'
+defaults['client/logs/console'] = True
+defaults['api'] = 'http://api.test.faforever.com'

@@ -1,50 +1,73 @@
 import sys
-
 import os
-from ctypes import *
+import getpass
+import locale
+import shutil
+import hashlib
+import re
+import subprocess
+import datetime
+
+from PyQt5.QtWidgets import QMessageBox
+from PyQt5.QtGui import QDesktopServices
+from PyQt5.QtCore import QUrl, QStandardPaths
+from PyQt5 import QtWidgets
+from PyQt5.uic import *
+
+from util.theme import Theme, ThemeSet
+
 from config import Settings
-
-# Developer mode flag
-def developer():
-    return sys.executable.endswith("python.exe")
-
 from config import VERSION as VERSION_STRING
+import fafpath
+import logging
 
-LOGFILE_MAX_SIZE = 256 * 1024  #256kb should be enough for anyone
+if sys.platform == 'win32':
+    import win32serviceutil
+    import win32service
+    import ctypes
+
+logger = logging.getLogger(__name__)
+
+LOGFILE_MAX_SIZE = 256 * 1024  # 256kb should be enough for anyone
 
 UNITS_PREVIEW_ROOT = "{}/faf/unitsDB/icons/big/".format(Settings.get('content/host'))
 
-#These are paths relative to the executable or main.py script
-COMMON_DIR = os.path.join(os.getcwd(), "res")
+COMMON_DIR = fafpath.get_resdir()
 
-# These directories are in Appdata (e.g. C:\ProgramData on some Win7 versions)
-if 'ALLUSERSPROFILE' in os.environ:
-    APPDATA_DIR = os.path.join(os.environ['ALLUSERSPROFILE'], "FAForever")
-else:
-    APPDATA_DIR = os.path.join(os.environ['HOME'], "FAForever")
+stylesheets = {}  # map [qt obj] ->  filename of stylesheet
 
-#This is used to store init_*.lua files
+APPDATA_DIR = Settings.get('client/data_path')
+
+# This is used to store init_*.lua files
 LUA_DIR = os.path.join(APPDATA_DIR, "lua")
 
-#This contains the themes
+# This contains the themes
 THEME_DIR = os.path.join(APPDATA_DIR, "themes")
 
-#This contains cached data downloaded while communicating with the lobby - at the moment, mostly map preview pngs.
+# This contains cached data downloaded while communicating with the lobby - at the moment, mostly map preview pngs.
 CACHE_DIR = os.path.join(APPDATA_DIR, "cache")
 
-#This contains cached data downloaded for FA extras
+# Use one cache with Java client (maps/small and maps/large)
+MAP_PREVIEW_SMALL_DIR = os.path.join(CACHE_DIR, "maps", "small")
+MAP_PREVIEW_LARGE_DIR = os.path.join(CACHE_DIR, "maps", "large")
+
+MOD_PREVIEW_DIR = os.path.join(CACHE_DIR, "mod_previews")
+
+# This contains cached data downloaded for FA extras
 EXTRA_DIR = os.path.join(APPDATA_DIR, "extra")
 
-#This contains the replays recorded by the local replay server
+# This contains the replays recorded by the local replay server
 REPLAY_DIR = os.path.join(APPDATA_DIR, "replays")
 
-#This contains all Lobby, Chat and Game logs
+# This contains all Lobby, Chat and Game logs
 LOG_DIR = os.path.join(APPDATA_DIR, "logs")
 LOG_FILE_FAF = os.path.join(LOG_DIR, 'forever.log')
-LOG_FILE_GAME = os.path.join(LOG_DIR, 'game.log')
+LOG_FILE_GAME_PREFIX = os.path.join(LOG_DIR, 'game')
+LOG_FILE_GAME = LOG_FILE_GAME_PREFIX + ".log"
+LOG_FILE_GAME_INFIX = ".uid."
 LOG_FILE_REPLAY = os.path.join(LOG_DIR, 'replay.log')
 
-#This contains the game binaries (old binFAF folder) and the game mods (.faf files)
+# This contains the game binaries (old binFAF folder) and the game mods (.faf files)
 BIN_DIR = os.path.join(APPDATA_DIR, "bin")
 GAMEDATA_DIR = os.path.join(APPDATA_DIR, "gamedata")
 REPO_DIR = os.path.join(APPDATA_DIR, "repo")
@@ -52,68 +75,77 @@ REPO_DIR = os.path.join(APPDATA_DIR, "repo")
 if not os.path.exists(REPO_DIR):
     os.makedirs(REPO_DIR)
 
+# Public settings object
+# Stolen from Config because reasons
+from config import _settings
+settings = _settings
+
+# initialize wine settings for non Windows platforms
+if sys.platform != 'win32':
+    wine_exe = settings.value("wine/exe", "wine", type=str)
+    wine_cmd_prefix = settings.value("wine/cmd_prefix", "", type=str)
+    if settings.contains("wine/prefix"):
+        wine_prefix = str(settings.value("wine/prefix", type=str))
+    else:
+        wine_prefix = os.path.join(os.path.expanduser("~"), ".wine")
+
 LOCALFOLDER = os.path.join(os.path.expandvars("%LOCALAPPDATA%"), "Gas Powered Games",
                            "Supreme Commander Forged Alliance")
 if not os.path.exists(LOCALFOLDER):
     LOCALFOLDER = os.path.join(os.path.expandvars("%USERPROFILE%"), "Local Settings", "Application Data",
                                "Gas Powered Games", "Supreme Commander Forged Alliance")
+if not os.path.exists(LOCALFOLDER) and sys.platform != 'win32':
+    LOCALFOLDER = os.path.join(wine_prefix, "drive_c", "users", getpass.getuser(), "Local Settings", "Application Data",
+                               "Gas Powered Games", "Supreme Commander Forged Alliance")
+
 PREFSFILENAME = os.path.join(LOCALFOLDER, "game.prefs")
+if not os.path.exists(PREFSFILENAME):
+    PREFSFILENAME = os.path.join(LOCALFOLDER, "Game.prefs")
 
 DOWNLOADED_RES_PIX = {}
 DOWNLOADING_RES_PIX = {}
 
-# This should be "My Documents" for most users. However, users with accents in their names can't even use these folders in Supcom
-# so we are nice and create a new home for them in the APPDATA_DIR
+PERSONAL_DIR = str(QStandardPaths.standardLocations(QStandardPaths.DocumentsLocation)[0])
+logger.info('PERSONAL_DIR initial: ' + PERSONAL_DIR)
 try:
-    os.environ['USERNAME'].decode('ascii')  # Try to see if the user has a wacky username
+    PERSONAL_DIR.encode("ascii")
 
-    import ctypes
-    from ctypes.wintypes import MAX_PATH
-
-    dll = ctypes.windll.shell32
-    buf = ctypes.create_unicode_buffer(MAX_PATH + 1)
-    if dll.SHGetSpecialFolderPathW(None, buf, 0x0005, False):
-        PERSONAL_DIR = (buf.value)
-    else:
-        raise StandardError
+    if not os.path.isdir(PERSONAL_DIR):
+        raise Exception('No documents location. Will use APPDATA instead.')
 except:
+    logger.exception('PERSONAL_DIR not ok, falling back.')
     PERSONAL_DIR = os.path.join(APPDATA_DIR, "user")
 
-#Ensure Application data directories exist
-if not os.path.isdir(APPDATA_DIR):
-    os.makedirs(APPDATA_DIR)
+logger.info('PERSONAL_DIR final: ' + PERSONAL_DIR)
 
-if not os.path.isdir(PERSONAL_DIR):
-    os.makedirs(PERSONAL_DIR)
+# Ensure Application data directories exist
 
-if not os.path.isdir(LUA_DIR):
-    os.makedirs(LUA_DIR)
+for data_dir in [APPDATA_DIR, PERSONAL_DIR, LUA_DIR, CACHE_DIR,
+                 MAP_PREVIEW_SMALL_DIR, MAP_PREVIEW_LARGE_DIR, MOD_PREVIEW_DIR, THEME_DIR, 
+                 REPLAY_DIR, LOG_DIR, EXTRA_DIR]:
+    if not os.path.isdir(data_dir):
+        os.makedirs(data_dir)
 
-if not os.path.isdir(CACHE_DIR):
-    os.makedirs(CACHE_DIR)
 
-if not os.path.isdir(THEME_DIR):
-    os.makedirs(THEME_DIR)
+def get_files_by_mod_date(location):
+    files = os.listdir(location)
+    files = map(lambda f: os.path.join(location, f), files)
+    files = sorted(files, key=os.path.getmtime)
+    files = list(map(os.path.basename, files))
+    return files
 
-if not os.path.isdir(REPLAY_DIR):
-    os.makedirs(REPLAY_DIR)
 
-if not os.path.isdir(LOG_DIR):
-    os.makedirs(LOG_DIR)
-
-if not os.path.isdir(EXTRA_DIR):
-    os.makedirs(EXTRA_DIR)
-
-from PyQt4 import QtGui, uic, QtCore
-from PyQt4.uic import *
-import shutil
-import hashlib
-import re
+def remove_obsolete_logs(location, pattern, max_number):
+    files = get_files_by_mod_date(location)
+    replay_files = [e for e in files if pattern in e]
+    while len(replay_files) >= max_number:
+        os.remove(os.path.join(location, replay_files[0]))
+        replay_files.pop(0)
 
 
 # Dirty log rotation: Get rid of logs if larger than 1 MiB
 try:
-    #HACK: Clean up obsolete logs directory trees
+    # HACK: Clean up obsolete logs directory trees
     if os.path.isfile(os.path.join(LOG_DIR, "faforever.log")):
         shutil.rmtree(LOG_DIR)
         os.makedirs(LOG_DIR)
@@ -121,22 +153,25 @@ try:
     if os.path.isfile(LOG_FILE_FAF):
         if os.path.getsize(LOG_FILE_FAF) > LOGFILE_MAX_SIZE:
             os.remove(LOG_FILE_FAF)
+    if os.path.isfile(LOG_FILE_GAME):
+        if os.path.getsize(LOG_FILE_GAME) > LOGFILE_MAX_SIZE:
+            os.remove(LOG_FILE_GAME)
+    remove_obsolete_logs(LOG_DIR, LOG_FILE_GAME_INFIX, 30)
 except:
     pass
 
-import logging
-logger = logging.getLogger(__name__)
 
 def clearDirectory(directory, confirm=True):
-    if (os.path.isdir(directory)):
+    if os.path.isdir(directory):
         if (confirm):
-            result = QtGui.QMessageBox.question(None, "Clear Directory",
-                                                "Are you sure you wish to clear the following directory:<br/><b>&nbsp;&nbsp;" + directory + "</b>",
-                                                QtGui.QMessageBox.Yes, QtGui.QMessageBox.No)
+            result = QtWidgets.QMessageBox.question(None, "Clear Directory", "Are you sure you wish to clear the "
+                                                                             "following directory:<br/><b>&nbsp;&nbsp;"
+                                                    + directory + "</b>",
+                                                    QtWidgets.QMessageBox.Yes, QtWidgets.QMessageBox.No)
         else:
-            result = QtGui.QMessageBox.Yes
+            result = QtWidgets.QMessageBox.Yes
 
-        if (result == QtGui.QMessageBox.Yes):
+        if result == QtWidgets.QMessageBox.Yes:
             shutil.rmtree(directory)
             return True
         else:
@@ -144,349 +179,67 @@ def clearDirectory(directory, confirm=True):
 
 
 # Theme and settings
-__pixmapcache = {}
-__theme = None
-__themedir = None
+
+THEME = None
 
 
-# Public settings object
-# Stolen from Config because reasons
-from config import _settings
-settings = _settings
+def _setup_theme():
+    global THEME
+    global VERSION_STRING
 
-def clean_slate(path):
-    if os.path.exists(path):
-        logger.info("Wiping " + path)
-        shutil.rmtree(path)
-    os.makedirs(path)
-
-
-def loadTheme():
-    global __theme
-    global __themedir
-
-    settings.beginGroup("theme")
-    loaded = settings.value("theme/name")
-    settings.endGroup()
-    logger.debug("Loaded Theme: " + str(loaded))
-
-    setTheme(loaded, False)
-
-
-def getTheme():
-    return __theme
-
-
-def setTheme(theme, restart=True):
-    global __theme
-    global __themedir
-
-    __theme = None
-    __themedir = None
-
-    if theme:
-        test_dir = os.path.join(THEME_DIR, theme)
-        if os.path.isdir(test_dir):
-            version_file = os.path.join(THEME_DIR, theme, "version")
-            if os.path.isfile(version_file) and (VERSION_STRING == open(version_file).read()):
-                logger.info("Using theme: " + theme + " in directory " + test_dir)
-                __themedir = test_dir
-                __theme = theme
-            else:
-                result = QtGui.QMessageBox.question(QtGui.QApplication.activeWindow(), "Incompatible Theme",
-                                                    "The following theme is not the right version:<br/><b>" + theme + "</b><br/><i>Contact the maker of the theme for an update!</i><br/><br/><b>Reset to default, or apply theme anyway?</b>",
-                                                    QtGui.QMessageBox.Apply, QtGui.QMessageBox.Reset)
-                if result == QtGui.QMessageBox.Apply:
-                    logger.info("Using theme: " + theme + " in directory " + test_dir)
-                    __themedir = test_dir
-                    __theme = theme
-                else:
-                    logger.warn(
-                        "Theme '" + theme + "' does not have the appropriate version string.<br/><b> FAF is reverting to unthemed mode for safety.</b><br/>Check the source where you got the theme for an update.")
-        else:
-            logger.error("Theme not found: " + theme + " in directory " + test_dir)
-
-            #Save theme setting
-    settings.beginGroup("theme")
-    settings.setValue("theme/name", __theme)
-    settings.endGroup()
-    settings.sync()
-
-    if restart:
-        QtGui.QMessageBox.information(None, "Restart Needed", "FAF will quit now.")
-        QtGui.QApplication.quit()
-
-
-def listThemes():
-    '''
-    Searches the THEME_DIR for all available themes, returning them as Callable Theme objects.
-    '''
-    themes = [None]
-    if (os.path.isdir(THEME_DIR)):
+    default = Theme(COMMON_DIR, None)
+    themes = []
+    if os.path.isdir(THEME_DIR):
         for infile in os.listdir(THEME_DIR):
+            theme_path = os.path.join(THEME_DIR, infile)
             if os.path.isdir(os.path.join(THEME_DIR, infile)):
-                themes.append(infile)
-    else:
-        logger.error("No Theme Directory")
-    return themes
+                themes.append(Theme(theme_path, infile))
+    THEME = ThemeSet(themes, default, Settings, VERSION_STRING)
 
 
-def curDownloadAvatar(url):
-    if url in DOWNLOADING_RES_PIX:
-        return DOWNLOADING_RES_PIX[url]
-    return None
-
-
-def removeCurrentDownloadAvatar(url, player, item):
-    if url in DOWNLOADING_RES_PIX:
-        DOWNLOADING_RES_PIX[url].remove(player)
-
-
-def addcurDownloadAvatar(url, player):
-    if url in DOWNLOADING_RES_PIX:
-        if not player in DOWNLOADING_RES_PIX[url]:
-            DOWNLOADING_RES_PIX[url].append(player)
-        return False
-    else:
-        DOWNLOADING_RES_PIX[url] = []
-        DOWNLOADING_RES_PIX[url].append(player)
-        return True
-
-
-def addrespix(url, pixmap):
-    DOWNLOADED_RES_PIX[url] = pixmap
-
-
-def respix(url):
-    if url in DOWNLOADED_RES_PIX:
-        return DOWNLOADED_RES_PIX[url]
-    return None
-
-
-def pixmap(filename, themed=True):
-    '''
-    This function loads a pixmap from a themed directory, or anywhere.
-    It also stores them in a cache dictionary (may or may not be necessary depending on how Qt works under the hood)
-    '''
-    try:
-        return __pixmapcache[filename]
-    except:
-        if themed:
-            if __themedir and os.path.isfile(os.path.join(__themedir, filename)):
-                pix = QtGui.QPixmap(os.path.join(__themedir, filename))
-            else:
-                pix = QtGui.QPixmap(os.path.join(COMMON_DIR, filename))
-        else:
-            pix = QtGui.QPixmap(filename)  #Unthemed means this can come from any location
-
-        __pixmapcache[filename] = pix
-        return pix
-    return None
-
-
-def loadUi(filename, themed=True):
-    '''
-    Loads and compiles a Qt Ui file via uic.
-    Looks in theme directories first. Nonthemed means the file can come from anywhere.
-    '''
-    if themed:
-        if __themedir and os.path.isfile(os.path.join(__themedir, filename)):
-            ui = uic.loadUi(os.path.join(__themedir, filename))
-        else:
-            ui = uic.loadUi(os.path.join(COMMON_DIR, filename))
-    else:
-        ui = uic.loadUi(filename)  #Unthemed means this can come from any location
-
-    return ui
-
-
-def loadUiType(filename, themed=True):
-    '''
-    Loads and compiles a Qt Ui file via uic, and returns the Type and Basetype as a tuple
-    Looks in theme directories first. Nonthemed means the file can come from anywhere.
-    '''
-    if themed:
-        if __themedir and os.path.isfile(os.path.join(__themedir, filename)):
-            return uic.loadUiType(os.path.join(__themedir, filename))
-        else:
-            return uic.loadUiType(os.path.join(COMMON_DIR, filename))
-    else:
-        return uic.loadUiType(filename)  #Unthemed means this can come from any location
-
-
-def readlines(filename, themed=True):
-    '''
-    Reads and returns the contents of a file. It looks in theme folders first.
-    If non-themed, the file can come from anywhere.
-    '''
-    if themed:
-        if __themedir and os.path.isfile(os.path.join(__themedir, filename)):
-            result = open(os.path.join(__themedir, filename))
-            logger.debug(u"Read themed file: " + filename)
-        else:
-            result = open(os.path.join(COMMON_DIR, filename))
-            logger.debug(u"Read common file: " + filename)
-    else:
-        result = open(filename)
-        logger.debug(u"Read unthemed file: " + filename)
-
-    lines = result.readlines()
-    result.close()
-    return lines
-
-
-def readstylesheet(filename):
-    if __themedir and os.path.isfile(os.path.join(__themedir, filename)):
-        result = open(os.path.join(__themedir, filename)).read().replace("%THEMEPATH%", __themedir.replace("\\", "/"))
-        logger.info(u"Read themed stylesheet: " + filename)
-    else:
-        baseDir = os.path.join(COMMON_DIR, os.path.dirname(filename))
-        result = open(os.path.join(COMMON_DIR, filename)).read().replace("%THEMEPATH%", baseDir.replace("\\", "/"))
-        logger.info(u"Read common stylesheet: " + filename)
-
-    return result
-
-
-def themeurl(filename):
-    '''
-    This creates an url to use for a local stylesheet. It's a bit of a hack because Qt has a bug identifying proper localfile QUrls
-    '''
-    if __themedir and os.path.isfile(os.path.join(__themedir, filename)):
-        return QtCore.QUrl("file://" + os.path.join(__themedir, filename).replace("\\", "/"))
-    elif os.path.isfile(os.path.join(COMMON_DIR, filename)):
-        return QtCore.QUrl("file://" + os.path.join(os.getcwd(), COMMON_DIR, filename).replace("\\", "/"))
-    else:
-        return None
-
-
-def readfile(filename, themed=True):
-    '''
-    Reads and returns the contents of a file. It looks in theme folders first.
-    If non-themed, the file can come from anywhere.
-    '''
-    if themed:
-        if __themedir and os.path.isfile(os.path.join(__themedir, filename)):
-            result = open(os.path.join(__themedir, filename))
-            logger.debug(u"Read themed file: " + filename)
-        else:
-            result = open(os.path.join(COMMON_DIR, filename))
-            logger.debug(u"Read common file: " + filename)
-    else:
-        result = open(filename)
-        logger.debug(u"Read unthemed file: " + filename)
-
-    data = result.read()
-    result.close()
-    return data
+_setup_theme()
 
 
 def __downloadPreviewFromWeb(unitname):
-    '''
+    """
     Downloads a preview image from the web for the given unit name
-    '''
-    #This is done so generated previews always have a lower case name. This doesn't solve the underlying problem (case folding Windows vs. Unix vs. FAF)
-    import urllib2
+    """
+    # This is done so generated previews always have a lower case name.
+    # This doesn't solve the underlying problem (case folding Windows vs. Unix vs. FAF)
+    import urllib.request, urllib.error, urllib.parse
     unitname = unitname.lower()
 
     logger.debug("Searching web preview for: " + unitname)
 
-    url = UNITS_PREVIEW_ROOT + urllib2.quote(unitname)
-    header = urllib2.Request(url, headers={'User-Agent': "FAF Client"})
-    req = urllib2.urlopen(header)
+    url = UNITS_PREVIEW_ROOT + urllib.parse.quote(unitname)
+    header = urllib.request.Request(url, headers={'User-Agent': "FAF Client"})
+    req = urllib.request.urlopen(header)
     img = os.path.join(CACHE_DIR, unitname)
     with open(img, 'wb') as fp:
         shutil.copyfileobj(req, fp)
         fp.flush()
-        os.fsync(fp.fileno())  #probably works fine without the flush and fsync
+        os.fsync(fp.fileno())  # probably works fine without the flush and fsync
         fp.close()
+    return img
 
 
-def iconUnit(unitname):
-    # Try to load directly from cache
-
-    img = os.path.join(CACHE_DIR, unitname)
-    if os.path.isfile(img):
-        logger.debug("Using cached preview image for: " + unitname)
-        return icon(img, False)
-    # Try to download from web
-    img = __downloadPreviewFromWeb(unitname)
-    if img and os.path.isfile(img):
-        logger.debug("Using web preview image for: " + unitname)
-        return icon(img, False)
+def showDirInFileBrowser(location):
+    QDesktopServices.openUrl(QUrl.fromLocalFile(location))
 
 
-def icon(filename, themed=True, pix=False):
-    '''
-    Convenience method returning an icon from a cached, optionally themed pixmap as returned by the util.pixmap(...) function
-    '''
-    if pix:
-        return pixmap(filename, themed)
+def showFileInFileBrowser(location):
+    if sys.platform == 'win32':
+        # Ensure that the path is in Windows format
+        location = os.path.normpath(location)
+        # Open the directory and highlight the picked file
+        subprocess.Popen('explorer /select,"{}"'.format(location))
     else:
-        icon = QtGui.QIcon()
-        icon.addPixmap(pixmap(filename, themed), QtGui.QIcon.Normal)
-        splitExt = os.path.splitext(filename)
-        if len(splitExt) == 2:
-            pixDisabled = pixmap(splitExt[0] + "_disabled" + splitExt[1], themed)
-            if pixDisabled != None:
-                icon.addPixmap(pixDisabled, QtGui.QIcon.Disabled, QtGui.QIcon.On)
-
-            pixActive = pixmap(splitExt[0] + "_active" + splitExt[1], themed)
-            if pixActive != None:
-                icon.addPixmap(pixActive, QtGui.QIcon.Active, QtGui.QIcon.On)
-
-            pixSelected = pixmap(splitExt[0] + "_selected" + splitExt[1], themed)
-            if pixSelected != None:
-                icon.addPixmap(pixSelected, QtGui.QIcon.Selected, QtGui.QIcon.On)
-
-        return icon
+        # No highlighting on cross-platform, sorry!
+        showDirInFileBrowser(os.path.dirname(location))
 
 
-def sound(filename, themed=True):
-    '''
-    Plays a sound, from one of the themed or fallback folders, or optionally from anywhere if unthemed.
-    '''
-    if themed:
-        if __themedir and os.path.isfile(os.path.join(__themedir, filename)):
-            QtGui.QSound.play(os.path.join(__themedir, filename))
-        else:
-            QtGui.QSound.play(os.path.join(COMMON_DIR, filename))
-    else:
-        QtGui.QSound.play(filename)
-
-
-def wait(until):
-    '''
-    Super-simple wait function that takes a callable and waits until the callable returns true or the user aborts.
-    '''
-    progress = QtGui.QProgressDialog()
-    progress.show()
-
-    while not until() and progress.isVisible():
-        QtGui.QApplication.processEvents()
-
-    progress.close()
-
-    return not progress.wasCanceled()
-
-
-def openInExplorer(location):
-    '''
-    Opens a given location in Windows Explorer
-    '''
-    import subprocess
-
-    _command = (u'explorer  "%s"' % location).encode(sys.getfilesystemencoding())
-    subprocess.Popen(_command)
-
-
-def showInExplorer(location):
-    """
-    Opens a given location's parent in Windows Explorer and focuses the location in it.
-    """
-    import subprocess
-
-    _command = (u'explorer  /select, "%s"' % location).encode(sys.getfilesystemencoding())
-    subprocess.Popen(_command)
+def showConfigFile():
+    showFileInFileBrowser(Settings.fileName())
 
 
 html_escape_table = {
@@ -503,13 +256,13 @@ def html_escape(text):
     return "".join(html_escape_table.get(c, c) for c in text)
 
 
-def irc_escape(text, a_style=""):
-    #first, strip any and all html
+def irc_escape(text):
+    # first, strip any and all html
     text = html_escape(text)
 
-    #taken from django and adapted
+    # taken from django and adapted
     url_re = re.compile(
-        r'^((https?|faflive|fafgame|fafmap|ftp|ts3server)://)?'  # protocols    
+        r'^((https?|faflive|fafgame|fafmap|ftp|ts3server)://)?'  # protocols
         r'(?:(?:[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?\.)+'  # domain name, then TLDs
         r'(?:ac|ad|ae|aero|af|ag|ai|al|am|an|ao|aq|ar|arpa|as|asia|at|au|aw|ax|az|ba|bb|bd|be|bf|bg|bh|bi|biz|bj|bm|bn|bo|br|bs|bt|bv|bw|by|bz|ca|cat|cc|cd|cf|cg|ch|ci|ck|cl|cm|cn|co|com|coop|cr|cu|cv|cw|cx|cy|cz|de|dj|dk|dm|do|dz|ec|edu|ee|eg|er|es|et|eu|fi|fj|fk|fm|fo|fr|ga|gb|gd|ge|gf|gg|gh|gi|gl|gm|gn|gov|gp|gq|gr|gs|gt|gu|gw|gy|hk|hm|hn|hr|ht|hu|id|ie|il|im|in|info|int|io|iq|ir|is|it|je|jm|jo|jobs|jp|ke|kg|kh|ki|km|kn|kp|kr|kw|ky|kz|la|lb|lc|li|lk|lr|ls|lt|lu|lv|ly|ma|mc|md|me|mg|mh|mil|mk|ml|mm|mn|mo|mobi|mp|mq|mr|ms|mt|mu|museum|mv|mw|mx|my|mz|na|name|nc|ne|net|nf|ng|ni|nl|no|np|nr|nu|nz|om|org|pa|pe|pf|pg|ph|pk|pl|pm|pn|pr|pro|ps|pt|pw|py|qa|re|ro|rs|ru|rw|sa|sb|sc|sd|se|sg|sh|si|sj|sk|sl|sm|sn|so|sr|st|su|sv|sx|sy|sz|tc|td|tel|tf|tg|th|tj|tk|tl|tm|tn|to|tp|tr|travel|tt|tv|tw|tz|ua|ug|uk|us|uy|uz|va|vc|ve|vg|vi|vn|vu|wf|ws|xxx|ye|yt|za|zm|zw)'
         r'|localhost'  # localhost...
@@ -519,15 +272,15 @@ def irc_escape(text, a_style=""):
 
     # Tired of bothering with end-of-word cases in this regex
     # I'm splitting the whole string and matching each fragment start-to-end as a whole
-    strings = text.split()
+    strings = text.split(" ")
     result = []
     for fragment in strings:
         match = url_re.match(fragment)
         if match:
-            if u"://" in fragment:  #slight hack to get those protocol-less URLs on board. Better: With groups!
-                rpl = u'<a href="{0}" style="{1}">{0}</a>'.format(fragment, a_style)
+            if "://" in fragment:  # slight hack to get those protocol-less URLs on board. Better: With groups!
+                rpl = '<a href="{0}">{0}</a>'.format(fragment)
             else:
-                rpl = u'<a href="http://{0}" style="{1}">{0}</a>'.format(fragment, a_style)
+                rpl = '<a href="http://{0}">{0}</a>'.format(fragment)
 
             fragment = fragment.replace(match.group(0), rpl)
 
@@ -535,9 +288,13 @@ def irc_escape(text, a_style=""):
     return " ".join(result)
 
 
+def password_hash(password):
+    return hashlib.sha256(password.strip().encode("utf-8")).hexdigest()
+
+
 def md5text(text):
     m = hashlib.md5()
-    m.update(text)
+    m.update(text.encode('utf-8'))
     return m.hexdigest()
 
 
@@ -547,53 +304,62 @@ def md5(file_name):
     IOErrors raised here are handled in doUpdate.
     """
     m = hashlib.md5()
-    if not os.path.isfile(file_name): return None
+    if not os.path.isfile(file_name):
+        return None
 
     with open(file_name, "rb") as fd:
         while True:
             content = fd.read(1024 * 1024)
-            if not content: break
+            if not content:
+                break
             m.update(content)
 
     return m.hexdigest()
 
 
 def uniqueID(user, session):
-    ''' This is used to uniquely identify a user's machine to prevent smurfing. '''
+    """ This is used to uniquely identify a user's machine to prevent smurfing. """
+    # the UID check needs the WMI service running on Windows
+    if sys.platform == 'win32':
+        try:
+            _, wmi_state, _, _, _, _, _ = win32serviceutil.QueryServiceStatus('Winmgmt')
+            if wmi_state != win32service.SERVICE_RUNNING:
+                QMessageBox.critical(None, "WMI service not running", "FAF requires the 'Windows Management "
+                                                                      "Instrumentation' service for smurf protection "
+                                                                      "to be running. Please run 'service.msc', open "
+                                                                      "the 'Windows Management Instrumentation' "
+                                                                      "service, set the startup type to automatic and "
+                                                                      "restart FAF.")
+        except Exception as e:
+            QMessageBox.critical(None, "WMI service missing", "FAF requires the 'Windows Management Instrumentation' "
+                                                              "service for smurf protection. This service could not "
+                                                              "be found.")
+
+    if sys.platform == 'win32':
+        exe_path = os.path.join(fafpath.get_libdir(), "faf-uid.exe")
+    else:   # Expect it to be in PATH already
+        exe_path = "faf-uid"
     try:
-        if os.path.isfile("uid.dll"):
-            mydll = cdll.LoadLibrary("uid.dll")
+        uid_p = subprocess.Popen([exe_path, session], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        out, err = uid_p.communicate()
+        if uid_p.returncode != 0:
+            logger.error("UniqueID executable error:")
+            for line in err.decode('utf-8').split('\n'):
+                logger.error(line)
+            return None
         else:
-            mydll = cdll.LoadLibrary(os.path.join("lib", "uid.dll"))
-
-        mydll.uid.restype = c_char_p
-        baseString = (mydll.uid(session, os.path.join(LOG_DIR, "uid.log")) )
-        DllCanUnloadNow()
-
-        return baseString
-
-    except:
-        QtGui.QMessageBox.warning(None, "C++ 2010 Runtime Missing",
-                                  "You are missing the Microsoft Visual C++ 2010 Runtime.<br><br>Get it from here: <a href='https://www.microsoft.com/en-us/download/details.aspx?id=5555'>https://www.microsoft.com/en-us/download/details.aspx?id=5555</a>")
-        logger.warning("UniqueID Failure, user warned", exc_info=sys.exc_info())
-        QtGui.QApplication.quit()
-
-
-import datetime
-
-_dateDummy = datetime.datetime(2013, 5, 27)
+            return out.decode('utf-8')
+    except OSError as err:
+        logger.error("UniqueID error finding the executable: {}".format(err))
+        return None
 
 
 def strtodate(s):
-    return _dateDummy.strptime(s, "%Y-%m-%d %H:%M:%S")
+    return datetime.datetime.strptime(s, "%Y-%m-%d %H:%M:%S")
 
 
 def datetostr(d):
-    return str(d)[:-7]
+    return d.strftime("%Y-%m-%d %H:%M:%S")
 
 
-def now():
-    return _dateDummy.now()
-
-from crash import CrashDialog
-
+from .crash import CrashDialog, runtime_info

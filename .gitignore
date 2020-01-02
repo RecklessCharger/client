@@ -11,13 +11,15 @@
 *.pydev*
 *.vcproj
 .idea/
-uid.dll
+lib/faf-uid
+lib/faf-uid.exe
+ice-adapter/
 build/
 dist/
 Thumbs.db
 .DS_Store
 *.orig
-RELEASE-VERSION
+res/RELEASE-VERSION
 __pycache__
 .coverage
 client_venv

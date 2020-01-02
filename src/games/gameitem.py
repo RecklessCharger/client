@@ -1,402 +1,243 @@
-from PyQt4 import QtCore, QtGui
-import trueskill
-from trueskill import Rating
-from fa import maps
-import util
 import os
-from games.moditem import mod_invisible, mods
+import util
+from PyQt5 import QtCore, QtWidgets, QtGui
+from fa import maps
+import html
+import jinja2
 
-import client
-import copy
+class GameView(QtCore.QObject):
+    """
+    Helps with displaying games in the game widget. Forwards
+    interaction with the view.
+    """
+    game_double_clicked = QtCore.pyqtSignal(object)
 
-class GameItemDelegate(QtGui.QStyledItemDelegate):
-    
-    def __init__(self, *args, **kwargs):
-        QtGui.QStyledItemDelegate.__init__(self, *args, **kwargs)
-        
-    def paint(self, painter, option, index, *args, **kwargs):
-        self.initStyleOption(option, index)
-                
-        painter.save()
-        
-        html = QtGui.QTextDocument()
-        html.setHtml(option.text)
-        
-        icon = QtGui.QIcon(option.icon)
-        iconsize = icon.actualSize(option.rect.size())
-        
-        #clear icon and text before letting the control draw itself because we're rendering these parts ourselves
-        option.icon = QtGui.QIcon()        
-        option.text = ""  
-        option.widget.style().drawControl(QtGui.QStyle.CE_ItemViewItem, option, painter, option.widget)
-        
-        #Shadow
-        painter.fillRect(option.rect.left()+8-1, option.rect.top()+8-1, iconsize.width(), iconsize.height(), QtGui.QColor("#202020"))
+    def __init__(self, model, view, delegate):
+        QtCore.QObject.__init__(self)
+        self._model = model
+        self._view = view
+        self._delegate = delegate
 
-        #Icon
-        icon.paint(painter, option.rect.adjusted(5-2, -2, 0, 0), QtCore.Qt.AlignLeft|QtCore.Qt.AlignVCenter)
-        
-        #Frame around the icon
-        pen = QtGui.QPen()
-        pen.setWidth(1);
-        pen.setBrush(QtGui.QColor("#303030"));  #FIXME: This needs to come from theme.
-        pen.setCapStyle(QtCore.Qt.RoundCap);
-        painter.setPen(pen)
-        painter.drawRect(option.rect.left()+5-2, option.rect.top()+5-2, iconsize.width(), iconsize.height())
+        self._view.setModel(self._model)
+        self._view.setItemDelegate(self._delegate)
+        self._view.doubleClicked.connect(self._game_double_clicked)
+        self._view.viewport().installEventFilter(self._delegate.tooltip_filter)
 
-        #Description
-        painter.translate(option.rect.left() + iconsize.width() + 10, option.rect.top()+10)
-        clip = QtCore.QRectF(0, 0, option.rect.width()-iconsize.width() - 10 - 5, option.rect.height())
-        html.drawContents(painter, clip)
-  
-        painter.restore()
-        
+    # TODO make it a utility function?
+    def _model_items(self):
+        model = self._model
+        for i in range(model.rowCount(QtCore.QModelIndex())):
+            yield model.index(i, 0)
 
-    def sizeHint(self, option, index, *args, **kwargs):
-        self.initStyleOption(option, index)
-        
-        html = QtGui.QTextDocument()
-        html.setHtml(option.text)
-        html.setTextWidth(GameItem.TEXTWIDTH)
-        return QtCore.QSize(GameItem.ICONSIZE + GameItem.TEXTWIDTH + GameItem.PADDING, GameItem.ICONSIZE)  
+    def _game_double_clicked(self, idx):
+        self.game_double_clicked.emit(idx.data().game)
 
 
-class GameItem(QtGui.QListWidgetItem):
-    TEXTWIDTH = 230
-    ICONSIZE = 110
+class GameItemDelegate(QtWidgets.QStyledItemDelegate):
+    ICON_RECT = 100
+    ICON_CLIP_TOP_LEFT = 3
+    ICON_CLIP_BOTTOM_RIGHT = -7
+    ICON_SHADOW_OFFSET = 8
+    SHADOW_COLOR = QtGui.QColor("#202020")
+    FRAME_THICKNESS = 1
+    FRAME_COLOR = QtGui.QColor("#303030")
+    TEXT_OFFSET = 10
+    TEXT_RIGHT_MARGIN = 5
+
+    TEXT_WIDTH = 250
+    ICON_SIZE = 110
     PADDING = 10
-    
-    WIDTH = ICONSIZE + TEXTWIDTH
-    
-    FORMATTER_FAF       = unicode(util.readfile("games/formatters/faf.qthtml"))
-    FORMATTER_MOD       = unicode(util.readfile("games/formatters/mod.qthtml"))
-    FORMATTER_TOOL      = unicode(util.readfile("games/formatters/tool.qthtml"))
-    
-    def __init__(self, uid, *args, **kwargs):
-        QtGui.QListWidgetItem.__init__(self, *args, **kwargs)
 
-        self.uid            = uid
-        self.mapname        = None
-        self.mapdisplayname = None
-        self.client         = None
-        self.title          = None
-        self.host           = None
-        self.hostid         = -1
-        self.teams          = []
-        self.password_protected = False
-        self.mod            = None
-        self.mods           = None
-        self.moddisplayname = None
-        self.state          = None
-        self.gamequality    = 0
-        self.nTeams         = 0
-        self.options        = []
-        self.players        = []
-        
-        self.setHidden(True)
-        
-    def url(self, player_id=None):
-        if not player_id:
-            player_id = self.host
+    def __init__(self, formatter):
+        QtWidgets.QStyledItemDelegate.__init__(self)
+        self._formatter = formatter
+        self.tooltip_filter = GameTooltipFilter(self._formatter)
 
-        if self.state == "playing":
-            url = QtCore.QUrl()
-            url.setScheme("faflive")
-            url.setHost("lobby.faforever.com")
-            url.setPath(str(self.uid) + "/" + str(player_id) + ".SCFAreplay")
-            url.addQueryItem("map", self.mapname)
-            url.addQueryItem("mod", self.mod)
-            return url
-        elif self.state == "open":
-            url = QtCore.QUrl()
-            url.setScheme("fafgame")
-            url.setHost("lobby.faforever.com")
-            url.setPath(str(player_id))
-            url.addQueryItem("map", self.mapname)
-            url.addQueryItem("mod", self.mod)
-            url.addQueryItem("uid", str(self.uid))
-            return url
-        return None 
-        
-    @QtCore.pyqtSlot()
-    def announceReplay(self):
-        if not self.client.players.isFriend(self.hostid):
-            return
+    def paint(self, painter, option, index):
+        painter.save()
 
-        if not self.state == "playing":
-            return
-                
-        # User doesnt want to see this in chat   
-        if not self.client.livereplays:
-            return
+        data = index.data()
+        text = self._formatter.text(data)
+        icon = self._formatter.icon(data)
 
-        url = self.url()
-                      
-        if self.mod == "faf":
-            self.client.forwardLocalBroadcast(self.host, 'is playing live in <a style="color:' + self.client.getColor("url") + '" href="' + url.toString() + '">' + self.title + '</a> (on "' + self.mapdisplayname + '")')
+        self._draw_clear_option(painter, option)
+        self._draw_icon_shadow(painter, option)
+        self._draw_icon(painter, option, icon)
+        self._draw_frame(painter, option)
+        self._draw_text(painter, option, text)
+
+        painter.restore()
+
+    def _draw_clear_option(self, painter, option):
+        option.icon = QtGui.QIcon()
+        option.text = ""
+        option.widget.style().drawControl(QtWidgets.QStyle.CE_ItemViewItem,
+                                          option, painter, option.widget)
+
+    def _draw_icon_shadow(self, painter, option):
+        painter.fillRect(option.rect.left() + self.ICON_SHADOW_OFFSET,
+                         option.rect.top() + self.ICON_SHADOW_OFFSET,
+                         self.ICON_RECT,
+                         self.ICON_RECT,
+                         self.SHADOW_COLOR)
+
+    def _draw_icon(self, painter, option, icon):
+        rect = option.rect.adjusted(self.ICON_CLIP_TOP_LEFT,
+                                    self.ICON_CLIP_TOP_LEFT,
+                                    self.ICON_CLIP_BOTTOM_RIGHT,
+                                    self.ICON_CLIP_BOTTOM_RIGHT)
+        icon.paint(painter, rect, QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop)
+
+    def _draw_frame(self, painter, option):
+        pen = QtGui.QPen()
+        pen.setWidth(self.FRAME_THICKNESS)
+        pen.setBrush(self.FRAME_COLOR)
+        pen.setCapStyle(QtCore.Qt.RoundCap)
+        painter.setPen(pen)
+        painter.drawRect(option.rect.left() + self.ICON_CLIP_TOP_LEFT,
+                         option.rect.top() + self.ICON_CLIP_TOP_LEFT,
+                         self.ICON_RECT,
+                         self.ICON_RECT)
+
+    def _draw_text(self, painter, option, text):
+        left_off = self.ICON_RECT + self.TEXT_OFFSET
+        top_off = self.TEXT_OFFSET
+        right_off = self.TEXT_RIGHT_MARGIN
+        bottom_off = 0
+        painter.translate(option.rect.left() + left_off,
+                          option.rect.top() + top_off)
+        clip = QtCore.QRectF(0,
+                             0,
+                             option.rect.width() - left_off - right_off,
+                             option.rect.height() - top_off - bottom_off)
+        html = QtGui.QTextDocument()
+        html.setHtml(text)
+        html.drawContents(painter, clip)
+
+    def sizeHint(self, option, index):
+        return QtCore.QSize(self.ICON_SIZE + self.TEXT_WIDTH + self.PADDING,
+                            self.ICON_SIZE)
+
+
+class GameTooltipFilter(QtCore.QObject):
+    def __init__(self, formatter):
+        QtCore.QObject.__init__(self)
+        self._formatter = formatter
+
+    def eventFilter(self, obj, event):
+        if event.type() == QtCore.QEvent.ToolTip:
+            return self._handle_tooltip(obj, event)
         else:
-            self.client.forwardLocalBroadcast(self.host, 'is playing ' + self.mod + ' in <a style="color:' + self.client.getColor("url") + '" href="' + url.toString() + '">' + self.title + '</a> (on "' + self.mapdisplayname + '")')
-        
-    
-    @QtCore.pyqtSlot()
-    def announceHosting(self):
-        if not self.client.players.isFriend(self.hostid) or self.isHidden():
-            return
+            return super().eventFilter(obj, event)
 
-        if not self.state == "open":
-            return
+    def _handle_tooltip(self, widget, event):
+        view = widget.parent()
+        idx = view.indexAt(event.pos())
+        if not idx.isValid():
+            return False
 
-        url = self.url()
+        tooltip_text = self._formatter.tooltip(idx.data())
+        QtWidgets.QToolTip.showText(event.globalPos(), tooltip_text, widget)
+        return True
 
-        # Join url for single sword
-        client.instance.urls[self.host] = url
 
-        # No visible message if not requested   
-        if not self.client.opengames:
-            return
-                         
-        if self.mod == "faf":
-            self.client.forwardLocalBroadcast(self.host, 'is hosting <a style="color:' + self.client.getColor("url") + '" href="' + url.toString() + '">' + self.title + '</a> (on "' + self.mapdisplayname + '")')
+class GameItemFormatter:
+    FORMATTER_FAF = str(util.THEME.readfile("games/formatters/faf.qthtml"))
+    FORMATTER_MOD = str(util.THEME.readfile("games/formatters/mod.qthtml"))
+
+    def __init__(self, playercolors, me):
+        self._colors = playercolors
+        self._me = me
+        self._tooltip_formatter = GameTooltipFormatter(self._me)
+
+    def _featured_mod(self, game):
+        return game.featured_mod in ["faf", "coop"]
+
+    def _host_color(self, game):
+        hostid = game.host_player.id if game.host_player is not None else -1
+        return self._colors.get_user_color(hostid)
+
+    def text(self, data):
+        game = data.game
+        formatting = {
+            "color": self._host_color(game),
+            "mapslots": game.max_players,
+            "mapdisplayname": html.escape(game.mapdisplayname),
+            "title": html.escape(game.title),
+            "host": html.escape(game.host),
+            "players": game.num_players,
+            "playerstring": "player" if game.num_players == 1 else "players",
+            "avgrating": int(game.average_rating)
+        }
+        if self._featured_mod(game):
+            return self.FORMATTER_FAF.format(**formatting)
         else:
-            self.client.forwardLocalBroadcast(self.host, 'is hosting ' + self.mod + ' <a style="color:' + self.client.getColor("url") + '" href="' + url.toString() + '">' + self.title + '</a> (on "' + self.mapdisplayname + '")')
+            formatting["mod"] = html.escape(game.featured_mod)
+            return self.FORMATTER_MOD.format(**formatting)
 
-    def update(self, message, client):
-        '''
-        Updates this item from the message dictionary supplied
-        '''
-        self.client  = client
+    def icon(self, data):
+        game = data.game
+        name = game.mapname.lower()
+        if game.password_protected:
+            return util.THEME.icon("games/private_game.png")
 
-        self.title = message['title']
-        self.host = message['host']
+        icon = maps.preview(name)
+        if icon is not None:
+            return icon
 
-        if 'host_id' in message:
-            self.hostid = message['host_id']
-        else:
-            self.hostid = self.client.players.getID(self.host)
+        return util.THEME.icon("games/unknown_map.png")
+
+    def needed_map_preview(self, data):
+        game = data.game
+        name = game.mapname.lower()
+        if game.password_protected or maps.preview(name) is not None:
+            return None
+        return name
+
+    def _game_teams(self, game):
+        teams = {index: [game.to_player(name) if game.is_connected(name)
+                         else name for name in team]
+                 for index, team in game.playing_teams.items()}
+
+        # Sort teams into a list
+        # TODO - I believe there's a convention where team 1 is 'no team'
+        teamlist = [indexed_team for indexed_team in teams.items()]
+        teamlist.sort()
+        teamlist = [team for index, team in teamlist]
+        return teamlist
+
+    def _game_observers(self, game):
+        return [game.to_player(name) for name in game.observers
+                if game.is_connected(name)]
+
+    def tooltip(self, data):
+        game = data.game
+        teams = self._game_teams(game)
+        observers = self._game_observers(game)
+        return self._tooltip_formatter.format(teams, observers, game.sim_mods)
 
 
-        # Maps integral team numbers (from 2, with 1 "none") to lists of names.
-        teams_map = dict.copy(message['teams'])
-        self.password_protected = message.get('password_protected', False)
-        self.mod = message['featured_mod']
-        self.modVersion = message.get('featured_mod_versions', [])
-        self.mods = message.get('sim_mods', {})
-        self.options = message.get('options', [])
-        num_players = message.get('num_players', 0)
-        self.slots = message.get('max_players', 12)
-        
-        oldstate = self.state
-        self.state  = message['state']
+class GameTooltipFormatter:
 
-        # Assemble a players & teams lists
-        self.teamlist = []
-        self.observerlist = []
+    def __init__(self, me):
+        self._me = me
+        template_abs_path = os.path.join(util.COMMON_DIR, "games", "gameitem.qthtml")
+        with open(template_abs_path, "r") as templatefile:
+            self._template = jinja2.Template(templatefile.read())
 
-        self.setHidden((self.state != 'open') or (self.mod in mod_invisible))        
+    def format(self, teams, observers, mods):
+        icon_path = os.path.join("chat", "countries/")
+        icon_abs_path = os.path.join(util.COMMON_DIR, icon_path)
+        return self._template.render(teams=teams, mods=mods.values(), observers=observers, me=self._me.player, iconpath=icon_abs_path)
 
-        # Clear the status for all involved players (url may change, or players may have left, or game closed)        
-        for player in self.players:
-            if player.login in client.urls:
-                del client.urls[player.login]
 
-        # Just jump out if we've left the game, but tell the client that all players need their states updated
-        if self.state == "closed":
-            client.usersUpdated.emit(self.players)
-            return
+class GameViewBuilder:
+    def __init__(self, me, player_colors):
+        self._me = me
+        self._player_colors = player_colors
 
-        # Used to differentiate between newly added / removed and previously present players
-        oldplayers = set(map(lambda p: p.login, self.players))
-
-        # Following the convention used by the game, a team value of 1 represents "No team". Let's
-        # desugar those into "real" teams now (and convert the dict to a list)
-        # Also, turn the lists of names into lists of players, and build a player name list.
-        self.players = []
-        teams = []
-        for team_index, team in teams_map.iteritems():
-            if team_index == 1:
-                for ffa_player in team:
-                    if ffa_player in self.client.players:
-                        self.players.append(self.client.players[ffa_player])
-                        teams.append([self.client.players[ffa_player]])
-            else:
-                real_team = []
-                for name in team:
-                    if name in self.client.players:
-                        self.players.append(self.client.players[name])
-                        real_team.append(self.client.players[name])
-                teams.append(real_team)
-
-        # Tuples for feeding into trueskill.
-        rating_tuples = []
-        for team in teams:
-            ratings_for_team = map(lambda player: Rating(player.rating_mean, player.rating_deviation), team)
-            rating_tuples.append(tuple(ratings_for_team))
-
-        try:
-            self.gamequality = 100*round(trueskill.quality(rating_tuples), 2)
-        except ValueError:
-            self.gamequality = 0
-        self.nTeams = len(teams)
-
-        # Map preview code
-        if self.mapname != message['mapname']:
-            self.mapname = message['mapname']
-            self.mapdisplayname = maps.getDisplayName(self.mapname)
-            refresh_icon = True
-        else:
-            refresh_icon = False
-
-        #Alternate icon: If private game, use game_locked icon. Otherwise, use preview icon from map library.
-        if refresh_icon:
-            if self.password_protected:
-                icon = util.icon("games/private_game.png")
-            else:            
-                icon = maps.preview(self.mapname)
-                if not icon:
-                    self.client.downloader.downloadMap(self.mapname, self)
-                    icon = util.icon("games/unknown_map.png")
-                             
-            self.setIcon(icon)
-
-        strQuality = ""
-        
-        if self.gamequality == 0 :
-            strQuality = "? %"
-        else :
-            strQuality = str(self.gamequality)+" %"
-
-        if num_players == 1:
-            playerstring = "player"
-        else:
-            playerstring = "players"
-
-        color = client.players.getUserColor(self.hostid)
-
-        self.editTooltip(teams)
-
-        self.setText(self.FORMATTER_FAF.format(color=color, mapslots = self.slots, mapdisplayname=self.mapdisplayname, title=self.title, host=self.host, players=num_players, playerstring=playerstring, gamequality = strQuality))
-
-        #Spawn announcers: IF we had a gamestate change, show replay and hosting announcements 
-        if (oldstate != self.state):            
-            if (self.state == "playing"):
-                QtCore.QTimer.singleShot(5*60000, self.announceReplay) #The delay is there because we have a 5 minutes delay in the livereplay server
-            elif (self.state == "open"):
-                QtCore.QTimer.singleShot(35000, self.announceHosting)   #The delay is there because we currently the host needs time to choose a map
-
-        # Update player URLs
-        for player in self.players:
-            client.urls[player.login] = self.url(player.id)
-
-        # Determine which players are affected by this game's state change            
-        newplayers = set(map(lambda p: p.login, self.players))
-        affectedplayers = oldplayers | newplayers
-        client.usersUpdated.emit(list(affectedplayers))
-
-    def editTooltip(self, teams):
-        
-        observerlist    = []
-        teamlist        = []
-
-        teams_string = ""
-
-        i = 0
-        for team in teams:
-            
-            if team != "-1" :
-                i = i + 1
-                teamtxt = "<table>"
-
-                    
-                teamDisplay    = []
-                for player in team:
-                    displayPlayer = ""
-                    playerStr = player.login
-
-                    if player == self.client.me:
-                        playerStr = ("<b><i>%s</b></i>" % player.login)
-
-                    dev = player.rating_deviation
-                    if dev < 200 :
-                        playerStr += " ("+str(player.rating_estimate())+")"
-
-                    if i == 1 :
-                        displayPlayer = ("<td align = 'left' valign='center' width = '150'>%s</td>" % playerStr)
-                    elif i == self.nTeams :
-                        displayPlayer = ("<td align = 'right' valign='center' width = '150'>%s</td>" % playerStr)
-                    else :
-                        displayPlayer = ("<td align = 'center' valign='center' width = '150'>%s</td>" % playerStr)
-
-                    country = os.path.join(util.COMMON_DIR, "chat/countries/%s.png" % (player.country or '').lower())
-
-                    if i == self.nTeams :
-                        displayPlayer += '<td width="16"><img src = "'+country+'" width="16" height="16"></td>'
-                    else :
-                        displayPlayer = '<td width="16"><img src = "'+country+'" width="16" height="16"></td>' + displayPlayer
-
-                    display = ("<tr>%s</tr>" % displayPlayer)
-                    teamDisplay.append(display)
-                        
-                members = "".join(teamDisplay)
-                
-                teamlist.append("<td>" +teamtxt + members + "</table></td>")
-            else :
-                observerlist.append(",".join(self.teams[team]))
-
-        teams_string += "<td valign='center' height='100%'><font valign='center' color='black' size='+5'>VS</font></td>".join(teamlist)
-
-        observers = ""
-        if len(observerlist) != 0 :
-            observers = "Observers : "
-            observers += ",".join(observerlist)        
-
-        mods = ""
-
-        if self.mods:
-            mods += "<br/>With " + "<br/>".join(self.mods.values())
-
-        self.setToolTip(self.FORMATTER_TOOL.format(teams = teams_string, observers=observers, mods = mods))
-
-    def permutations(self, items):
-        """Yields all permutations of the items."""
-        if items == []:
-            yield []
-        else:
-            for i in range(len(items)):
-                for j in self.permutations(items[:i] + items[i+1:]):
-                    yield [items[i]] + j
-
-    def __ge__(self, other):
-        ''' Comparison operator used for item list sorting '''        
-        return not self.__lt__(other)
-    
-    
-    def __lt__(self, other):
-        ''' Comparison operator used for item list sorting '''        
-        if not self.client: return True # If not initialized...
-        if not other.client: return False;
-        
-        # Friend games are on top
-        if self.client.players.isFriend(self.hostid) and not self.client.players.isFriend(other.hostid): return True
-        if not self.client.players.isFriend(self.hostid) and self.client.players.isFriend(other.hostid): return False
-
-        # Sort Games
-        # 0: By Player Count
-        # 1: By Game Quality
-        # 2: By avg. Player Rating
-        try:
-            sortBy = self.listWidget().sortBy
-        except AttributeError:
-            sortBy = 99
-        if (sortBy == 0):
-            return len(self.players) > len(other.players)
-        elif (sortBy == 1):
-            return self.gamequality > other.gamequality
-        elif (sortBy == 2):
-            return self.average_rating > other.average_rating
-        else:
-            # Default: by UID.
-            return self.uid < other.uid
-
-    @property
-    def average_rating(self):
-        return sum(map(lambda p: p.rating_estimate(), self.players)) / max(len(self.players), 1)
+    def __call__(self, model, view):
+        game_formatter = GameItemFormatter(self._player_colors, self._me)
+        game_delegate = GameItemDelegate(game_formatter)
+        gameview = GameView(model, view, game_delegate)
+        return gameview

@@ -1,57 +1,61 @@
 # -*- coding: utf-8 -*-
 # Authors: Douglas Creager <dcreager@dcreager.net> and Moritz Voss
+# Modified by: Igor Kotrasinski <ikotrasinsk@gmail.com>
 # This file is placed into the public domain.
 
-# Calculates the current version number.  If possible, this is the
-# output of “git describe”, modified to conform to the versioning
-# scheme that setuptools uses.  If “git describe” returns an error
-# (most likely because we're in an unpacked copy of a release tarball,
-# rather than in a git working copy), then we fall back on reading the
-# contents of the RELEASE-VERSION file.
+# Calculates the current version number. The version number can come from
+# two sources - returned by git (last version tag and commit hash as given
+# by git-describe) or read from the RELEASE-VERSION file.
 #
-# To use this script, simply import it your setup.py file, and use the
-# results of get_git_version() as your package version:
+# The format of the version number is:
 #
-# from version import *
+# Major.Minor.Patch[-rc.Prerelease]+[Git_revision.]Build_id
 #
-# setup(
-# version=get_git_version(),
-#     .
-#     .
-#     .
-# )
+# The function get_git_version is used by setup scripts to read the version
+# (part before '+') and optional git revision. Build id comes from various
+# sources (appveyor, setup.py, this file if FAF is run from git).
 #
-# This will automatically create and update a RELEASE-VERSION file that can
-# be bundled with  your distributable. If one exists, it will read that.
+# Function 'build_version' can be used to assemble the full version from the
+# version, revision and build id. You can omit the build id to get a partial
+# version number without the build id (e.g. for an external build system).
+#
+# Function 'write_version_file' allows you to write version information.
+# It accepts a string to write and the directory you want to create the
+# version file in.
+#
+# Finally, you can run this file with an interpreter. It will print the
+# version string suitable for appending with the build number. If it fails
+# to find the version, the return value will be 1.
+#
 # Note that the RELEASE-VERSION file should *not* be checked into git;
 # please add it to your top-level .gitignore file.
 
-from subprocess import Popen, PIPE
+from subprocess import check_output
 import sys
+import os
+from semantic_version import Version
 
-__all__ = "get_git_version"
+__all__ = ["is_development_version", "is_prerelease_version",
+           "get_git_version", "build_version", "get_release_version", "write_version_file"]
 
-def call_git_describe():
-    try:
-        p = Popen(['git', 'describe', '--tags'],
-                  stdout=PIPE, stderr=PIPE)
-        p.stderr.close()
-        line = p.stdout.readlines()[0]
-        return line.strip()
-    except Exception as e:
-        print("Error grabbing git version: {}".format(e))
-        return "0.0.0-dev"
 
 def is_development_version(version):
-    return "-" in version and not is_prerelease_version(version)
+    # We're on a dev build if metadata has more items than just a build id
+    build = Version(version).build
+    return build is not None and len(build) >= 2
 
 
 def is_prerelease_version(version):
-    return "pre" in version or "rc" in version
+    return Version(version).prerelease is not None
 
-def read_release_version():
+
+def version_filename(dir):
+    return os.path.join(dir, "RELEASE-VERSION")
+
+
+def read_version_file(dir):
     try:
-        f = open("RELEASE-VERSION", "r")
+        f = open(version_filename(dir), "r")
 
         try:
             version = f.readlines()[0]
@@ -64,46 +68,69 @@ def read_release_version():
         return None
 
 
-def write_release_version(version):
-    with open("RELEASE-VERSION", "w") as f:
+def write_version_file(version, dir):
+    with open(version_filename(dir), "w") as f:
         f.write("%s\n" % version)
 
 
-def msi_version(git_version):
-    import re
-    sanitized = [fragment for fragment in re.findall(r"[\w']+", git_version) if fragment.isdigit()][:3]
-    return ".".join(sanitized) or "0.0.0"
+def get_git_version(git_dir=None):
+
+    def get_cmd_line(cmd):
+        lines = check_output(cmd).decode().splitlines()
+        line = lines[0]
+        return line
+
+    git_args = ['describe', '--tags', '--always']
+    if git_dir is not None:
+        git_args = ['-C', git_dir] + git_args
+
+    try:
+        # Get tag only first
+        tag = get_cmd_line(["git"] + git_args + ["--abbrev=0"])
+        # Now tag with commit info appended
+        version = get_cmd_line(["git"] + git_args)
+
+        # Strip leading hyphen
+        commit_tag = version[len(tag) + 1:]
+
+        return tag, commit_tag
+
+    except Exception as e:
+        sys.stderr.write("Error grabbing git version: {}".format(e))
+        return None
 
 
-def get_git_version():
-    # Read in the version that's currently in RELEASE-VERSION.
-    release_version = read_release_version()
+def build_version(version, revision, build=None):
+    return version + '+' + \
+           (revision + '.' if revision else '') + \
+           (build if build else '')
 
-    if hasattr(sys, 'frozen'):
-        return release_version
 
-    # First try to get the current version using “git describe”.
-    version = call_git_describe()
+# Distutils expect an x.y.z (non-semver) format
+def msi_version(version):
+    nopre_v = Version(version)
+    nopre_v.prerelease = None
+    return str(nopre_v)
 
-    # If that doesn't work, fall back on the value that's in
-    # RELEASE-VERSION.
 
-    if version is None:
-        version = release_version
+# Used by FAF to read the version at runtime
+def get_release_version(dir=None, git_dir=None):
+    version = read_version_file(dir) if dir is not None else None
+    if version is not None:
+        return version
 
-    # If we still don't have anything, that's an error.
-
-    if version is None:
-        raise ValueError("Cannot find the version number!")
-
-    # Finally, return the current version.
-    return version
+    # Maybe we are running from source?
+    git_version = get_git_version(git_dir)
+    if git_version is not None:
+        return build_version(*git_version, build="git")
+    else:
+        # If we still don't have anything, that's an error.
+        sys.stderr.write("Could not get git version" + os.linesep)
+        raise ValueError("Cannot find the version number! Please provide RELEASE-VERSION file or run from git.")
 
 
 if __name__ == "__main__":
     res = get_git_version()
-    if len(sys.argv) != 1:
-        res = """FAF Version: {} Dev: {} Pre: {}""".format(get_git_version(),
-                                                           is_development_version(res),
-                                                           is_prerelease_version(res))
-    print(res)
+    if res is None:
+        exit(1)
+    print(build_version(*res))
